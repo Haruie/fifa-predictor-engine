@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data (keep structure, ignore contents)
+data/raw/*
+!data/raw/.gitkeep
+data/external/*
+!data/external/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# Outputs (figures are committed -- small, and report.md links them)
+outputs/models/*
+!outputs/models/.gitkeep
+
+# Secrets
+.env
+kaggle.json
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/

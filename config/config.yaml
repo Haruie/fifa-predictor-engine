@@ -1,0 +1,45 @@
+project:
+  name: fifa-match-predictor
+  random_state: 42
+
+# Scope per proposal: FIFA World Cup, player rosters 2015-2023
+data:
+  years: [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023]
+  raw_dir: data/raw
+  processed_dir: data/processed
+  external_dir: data/external
+  # CONFIRMED (Aug 2026): player data comes from one Kaggle dataset per FIFA
+  # edition -- stefanoleone992/fifa-{edition}-complete-player-dataset, where
+  # edition = year - 2000 (e.g. year 2021 -> FIFA 21). Downloaded
+  # automatically by src/data/collect_players.py per configured year.
+  # Match data: martj42/international-football-results-from-1872-to-2017
+  # (slug is frozen but the dataset is actively updated well past 2017).
+  match_dataset_slug: "martj42/international-football-results-from-1872-to-2017"
+  # Widen training data beyond WC finals (97 matches) by also including WC
+  # qualifiers. Set False to reproduce the paper's finals-only baseline scope.
+  include_qualifiers: true
+
+features:
+  scaler: standard          # standard | minmax
+  use_pca: true
+  pca_variance_threshold: 0.95   # keep components explaining >= this much variance
+
+# Weighted Win Ratio baseline, per paper Section IV
+baseline:
+  min_head_to_head_matches: 5    # 75th percentile threshold from the paper
+  wwr_m: 10                      # WWR threshold parameter -- tune empirically in Phase 5
+
+models:
+  test_size: 0.2
+  cv_folds: 5
+  classifiers:
+    - logistic_regression
+    - random_forest
+    - xgboost
+    - adaboost
+    - knn
+
+evaluation:
+  # A match is "high-scoring" if combined goals >= this threshold (tune during EDA)
+  high_scoring_goal_threshold: 3
+  output_dir: outputs
