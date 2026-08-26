@@ -43,10 +43,6 @@ class WeightedWinRatioBaseline:
         Draws are counted as a played match for both teams but not a win for
         either, consistent with computing a simple win ratio.
         """
-        df = match_history_df.copy()
-        df = df[df["home_score"] != df["away_score"]]  # ties don't affect win ratios directly
-        # (If you want draws to count as 0.5 wins each, adjust here.)
-
         played: dict[str, int] = {}
         wins: dict[str, int] = {}
 

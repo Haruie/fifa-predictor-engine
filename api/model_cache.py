@@ -16,7 +16,7 @@ CACHE_DIR = resolve_path("outputs/models")
 
 
 def _cache_key(cfg: dict, seeds: list[int]) -> str:
-    relevant = {k: cfg[k] for k in ("data", "features", "baseline", "models")}
+    relevant = {k: cfg[k] for k in ("data", "features", "baseline", "models", "evaluation")}
     relevant["seeds"] = seeds
     return hashlib.sha256(json.dumps(relevant, sort_keys=True).encode()).hexdigest()[:16]
 

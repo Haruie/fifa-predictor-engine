@@ -29,6 +29,9 @@ def test_teams_and_predict_roundtrip():
             body = predict_resp.json()
             assert body["winner"] in (team_a["team"], team_b["team"])
             assert len(body["model_votes"]) == 5
+            # confidence and winner must derive from the same soft-vote
+            # direction, so confidence is always >= 50% for the declared winner.
+            assert 0.5 <= body["confidence"] <= 1.0
 
 
 def test_evaluation_endpoint():

@@ -28,6 +28,7 @@ def tune_all_models(X_train, y_train, cfg: dict) -> dict:
     cv = StratifiedKFold(n_splits=cfg["models"]["cv_folds"], shuffle=True, random_state=seed)
 
     base_estimators = build_base_estimators(random_state=seed)
+    base_estimators = {name: est for name, est in base_estimators.items() if name in cfg["models"]["classifiers"]}
     best_estimators = {}
 
     for name, estimator in base_estimators.items():

@@ -24,6 +24,12 @@ state: dict = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     cfg = load_config()
+    if cfg["project"]["random_state"] not in SEEDS:
+        raise ValueError(
+            f"config.yaml project.random_state ({cfg['project']['random_state']}) must be "
+            f"one of the hardcoded evaluation SEEDS {SEEDS} (api/main.py) so a default "
+            "report exists to serve -- add it to SEEDS or pick one of the existing values."
+        )
     bundle = load_or_train(cfg, SEEDS)
     state["profiles"] = bundle["profiles"]
     state["reports_by_seed"] = bundle["reports_by_seed"]
@@ -65,15 +71,19 @@ def predict(req: PredictRequest) -> dict:
     X_final = attrs["pca"].transform(X_scaled) if attrs["pca"] is not None else X_scaled
 
     ensemble = attrs["ensemble"]
-    winner_is_a = bool(ensemble.predict(X_final)[0])
     per_model_proba_a = {name: float(est.predict_proba(X_final)[0][1]) for name, est in ensemble.named_estimators_.items()}
     votes = {name: (req.team_a if p >= 0.5 else req.team_b) for name, p in per_model_proba_a.items()}
     # Each model's confidence in its OWN pick (always >= 0.5).
     model_confidence = {name: (p if p >= 0.5 else 1 - p) for name, p in per_model_proba_a.items()}
 
-    # Ensemble confidence: mean predicted probability across the 5 models,
-    # continuous (not the 60/80/100%-only artifact of counting hard votes).
+    # Winner and confidence both derive from the same soft-vote average, so
+    # they can never disagree in direction (a hard-vote winner combined with a
+    # separately-computed soft-vote confidence can point different ways when
+    # the vote is a narrow, low-conviction majority). The offline evaluation
+    # figures (README/report) still use the paper's hard majority vote via
+    # ensemble.predict() -- this only affects the live single-match endpoint.
     mean_proba_a = sum(per_model_proba_a.values()) / len(per_model_proba_a)
+    winner_is_a = mean_proba_a >= 0.5
     confidence = mean_proba_a if winner_is_a else 1 - mean_proba_a
 
     return {
