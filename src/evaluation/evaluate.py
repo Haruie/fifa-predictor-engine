@@ -18,6 +18,10 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
+# The ordered outcome convention (home win / draw / away win) belongs to the
+# scoreline model, so it is defined there and reused here rather than restated.
+from src.models.score_model import outcome_index
+
 
 def overall_accuracy(y_true, y_pred) -> float:
     return accuracy_score(y_true, y_pred)
@@ -164,3 +168,107 @@ def full_comparison_report(
             "Accuracy (Low-scoring)": bucket["low_scoring_accuracy"],
         })
     return pd.DataFrame(rows).set_index("Evaluation Metric")
+
+
+# --- Scoreline model evaluation -----------------------------------------
+#
+# The binary task is scored with accuracy; a scoreline model predicts a
+# distribution and has to be scored as one. Accuracy on the exact scoreline is
+# reportable but close to meaningless on its own -- there are 60 distinct
+# scorelines in the data and always guessing the modal 1-0 already gets 10.4%,
+# so the number looks catastrophic next to a 79% win-accuracy while describing
+# a completely different question. RPS and log-loss are the metrics that
+# actually rank these models.
+
+
+def ranked_probability_score(probs: np.ndarray, obs_idx: np.ndarray) -> float:
+    """Mean RPS over ordered outcomes (home win, draw, away win).
+
+    The standard metric for football forecasts: unlike log-loss it is sensitive
+    to *how far* a wrong prediction was, so putting mass on an away win when the
+    home side won is penalised more than putting it on a draw. Lower is better;
+    0 is a perfect confident forecast.
+    """
+    probs, obs_idx = np.asarray(probs, dtype=float), np.asarray(obs_idx)
+    onehot = np.zeros_like(probs)
+    onehot[np.arange(len(obs_idx)), obs_idx] = 1.0
+    cum_p, cum_o = np.cumsum(probs, axis=1), np.cumsum(onehot, axis=1)
+    # Last cumulative pair is 1 vs 1 by construction, so it contributes nothing
+    # and the normaliser is (categories - 1).
+    return float((((cum_p[:, :-1] - cum_o[:, :-1]) ** 2).sum(axis=1) / (probs.shape[1] - 1)).mean())
+
+
+def outcome_log_loss(probs: np.ndarray, obs_idx: np.ndarray) -> float:
+    """Mean negative log-likelihood of the realised outcome."""
+    probs, obs_idx = np.asarray(probs, dtype=float), np.asarray(obs_idx)
+    realised = probs[np.arange(len(obs_idx)), obs_idx]
+    return float(-np.log(np.clip(realised, 1e-12, None)).mean())
+
+
+def draw_calibration(probs: np.ndarray, obs_idx: np.ndarray) -> dict[str, float]:
+    """Predicted vs. actual draw rate -- the specific failure mode of an
+    independent-Poisson grid, which cannot represent score dependence at low
+    scorelines and so systematically under-predicts draws."""
+    probs, obs_idx = np.asarray(probs, dtype=float), np.asarray(obs_idx)
+    predicted = float(probs[:, 1].mean())
+    actual = float((obs_idx == 1).mean())
+    return {"predicted_draw_rate": predicted, "actual_draw_rate": actual,
+            "draw_gap": predicted - actual}
+
+
+def exact_scoreline_accuracy(pred_scores: np.ndarray, home_score, away_score) -> float:
+    """Share of matches whose exact scoreline was the model's modal prediction."""
+    pred_scores = np.asarray(pred_scores)
+    home_score, away_score = np.asarray(home_score), np.asarray(away_score)
+    return float(((pred_scores[:, 0] == home_score) & (pred_scores[:, 1] == away_score)).mean())
+
+
+def derived_win_accuracy(probs: np.ndarray, home_score, away_score) -> dict[str, float]:
+    """Win-accuracy implied by the scoreline distribution, on non-draw matches.
+
+    This is the only number directly comparable to the classifier ensemble, and
+    only on this subset: the binary task never sees draws, so scoring the score
+    model on rows the classifier is not asked about would compare two different
+    questions. Draw mass is ignored rather than redistributed -- the comparison
+    is "given it was decided, which side did the model favour".
+    """
+    probs = np.asarray(probs, dtype=float)
+    home_score, away_score = np.asarray(home_score), np.asarray(away_score)
+    decided = home_score != away_score
+    if not decided.any():
+        return {"derived_win_accuracy": float("nan"), "n_decided": 0}
+
+    picked_home = probs[decided, 0] > probs[decided, 2]
+    actual_home = home_score[decided] > away_score[decided]
+    return {"derived_win_accuracy": float((picked_home == actual_home).mean()),
+            "n_decided": int(decided.sum())}
+
+
+def score_model_report(probs: np.ndarray, pred_scores: np.ndarray,
+                       home_score, away_score,
+                       expected_goals: np.ndarray | None = None) -> pd.Series:
+    """Every scoreline metric in one row, for stacking across seeds.
+
+    Args:
+        expected_goals: optional (n, 2) array of predicted goal rates, for MAE.
+            MAE is scored against the rate rather than the modal scoreline --
+            the rate is the model's actual point estimate, and rounding it first
+            would measure the rounding as much as the model.
+    """
+    obs = outcome_index(home_score, away_score)
+    out = {
+        "RPS": ranked_probability_score(probs, obs),
+        "Log Loss": outcome_log_loss(probs, obs),
+        "Exact Scoreline": exact_scoreline_accuracy(pred_scores, home_score, away_score),
+        "Derived Win Accuracy": derived_win_accuracy(probs, home_score, away_score)["derived_win_accuracy"],
+    }
+    if expected_goals is not None:
+        expected_goals = np.asarray(expected_goals, dtype=float)
+        out["Goal MAE"] = float(
+            (np.abs(expected_goals[:, 0] - np.asarray(home_score)).mean()
+             + np.abs(expected_goals[:, 1] - np.asarray(away_score)).mean()) / 2
+        )
+    cal = draw_calibration(probs, obs)
+    out.update({"Predicted Draw Rate": cal["predicted_draw_rate"],
+                "Actual Draw Rate": cal["actual_draw_rate"]})
+    return pd.Series(out)

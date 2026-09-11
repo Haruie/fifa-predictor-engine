@@ -65,7 +65,8 @@ def _attach_team_profiles(pairs_df: pd.DataFrame, team_profiles: pd.DataFrame) -
 
 
 def build_match_features(matches_df: pd.DataFrame, team_profiles: pd.DataFrame,
-                         edition_aware: bool = True) -> pd.DataFrame:
+                         edition_aware: bool = True,
+                         drop_draws: bool = True) -> pd.DataFrame:
     """Join team-year profiles onto each match for both the home and away team,
     producing one row per match with `_a` / `_b` / `_diff` suffixed columns.
 
@@ -76,6 +77,13 @@ def build_match_features(matches_df: pd.DataFrame, team_profiles: pd.DataFrame,
         edition_aware: read squads from the FIFA edition current on the match
             date rather than the one labelled with the match's calendar year.
             See `edition_for_match_date`.
+        drop_draws: exclude drawn matches, per the paper's binary framing. The
+            scoreline model is the one caller that passes False -- it predicts a
+            distribution over scorelines, in which a draw is an ordinary outcome
+            rather than an unrepresentable one. Leaving them in recovers about a
+            quarter of the match record. **`label` is meaningless on drawn rows
+            when this is False** (it computes as 0, i.e. indistinguishable from
+            an away win); anything reading `label` must filter draws itself.
     """
     matches_df = matches_df.copy()
     matches_df["profile_year"] = (
@@ -91,7 +99,9 @@ def build_match_features(matches_df: pd.DataFrame, team_profiles: pd.DataFrame,
     merged = merged.dropna(subset=["home_score", "away_score"])
 
     # Binary label: exclude draws per the paper's classification framing.
-    merged = merged[merged["home_score"] != merged["away_score"]].copy()
+    if drop_draws:
+        merged = merged[merged["home_score"] != merged["away_score"]]
+    merged = merged.copy()
     merged["label"] = (merged["home_score"] > merged["away_score"]).astype(int)  # 1 = Team A (home) wins
 
     # Numeric copy of results.csv's `neutral` flag, so it can be a model feature
