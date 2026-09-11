@@ -3,7 +3,7 @@ import {
   Bar, BarChart, CartesianGrid, LabelList, Legend, Line, LineChart,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
-import { getEvaluation } from '../api'
+import { getEvaluation, withRetry } from '../api'
 import { MODEL_LABEL, humanizeFeature } from '../constants'
 
 const MODELS = ['Logistic Regression', 'Random Forest', 'XGBoost', 'AdaBoost', 'KNN']
@@ -74,9 +74,20 @@ function StatBand({ data }) {
       </div>
       <div className="model-roster">
         <strong>5-model ensemble</strong> — {MODELS.join(' · ')} · majority vote
+        <span className="panel-scope">
+          accuracy figures averaged over {data.seeds.length} seeds ({data.seeds.join(', ')})
+        </span>
       </div>
     </div>
   )
+}
+
+// Most panels are computed from a single seed's held-out test split, while the
+// stat tiles and the stability chart average across all seeds. Without a label
+// the page looks self-contradictory: the tiles can show the ensemble ahead
+// while the single-seed comparison below shows the baseline winning.
+function Scope({ children }) {
+  return <span className="panel-scope">{children}</span>
 }
 
 function ConfusionTable({ title, matrix }) {
@@ -103,12 +114,25 @@ function ConfusionTable({ title, matrix }) {
 export default function Dashboard() {
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
+  const [starting, setStarting] = useState(false)
 
   useEffect(() => {
-    getEvaluation().then(setData).catch((err) => setError(err.message))
+    let cancelled = false
+    withRetry(getEvaluation, { onWait: () => !cancelled && setStarting(true) })
+      .then((d) => { if (!cancelled) { setStarting(false); setData(d) } })
+      .catch((err) => { if (!cancelled) { setStarting(false); setError(err.message) } })
+    return () => { cancelled = true }
   }, [])
 
   if (error) return <p className="error">{error}</p>
+  if (starting) {
+    return (
+      <p className="hint">
+        Waiting for the backend… it trains the 5-seed ensemble on first start,
+        which takes a few minutes. This page will load itself when it's ready.
+      </p>
+    )
+  }
   if (!data) return <p className="hint">Loading evaluation results…</p>
 
   const accuracyRows = data.comparison.map((row) => ({
@@ -148,7 +172,7 @@ export default function Dashboard() {
       <StatBand data={data} />
 
       <section className="card">
-        <h3>Accuracy: proposed vs. baseline</h3>
+        <h3>Accuracy: proposed vs. baseline <Scope>seed {data.default_seed} only</Scope></h3>
         <ResponsiveContainer width="100%" height={300}>
           <BarChart data={accuracyRows} margin={{ top: 20, right: 0, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--color-rule)" />
@@ -172,7 +196,9 @@ export default function Dashboard() {
       <section className="result confusion-panel">
         <div className="result-head">
           <span className="result-status">error analysis</span>
-          <span className="result-matchup">predicted: away win → home win</span>
+          <span className="result-matchup">
+            predicted: away win → home win <Scope>seed {data.default_seed} only</Scope>
+          </span>
         </div>
         <div className="confusion-pair">
           <ConfusionTable title="Proposed" matrix={data.confusion_matrix.proposed} />
@@ -182,7 +208,7 @@ export default function Dashboard() {
 
       <div className="chart-row">
         <section className="card">
-          <h3>Stability across 5 seeds</h3>
+          <h3>Stability across 5 seeds <Scope>all seeds: {data.seeds.join(', ')}</Scope></h3>
           <ResponsiveContainer width="100%" height={240}>
             <LineChart data={seedRows}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--color-rule)" />
@@ -198,7 +224,7 @@ export default function Dashboard() {
 
         {pcaRows && (
           <section className="card">
-            <h3>PCA cumulative variance</h3>
+            <h3>PCA cumulative variance <Scope>seed {data.default_seed} only</Scope></h3>
             <ResponsiveContainer width="100%" height={240}>
               <LineChart data={pcaRows}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--color-rule)" />
@@ -214,7 +240,7 @@ export default function Dashboard() {
 
       <div className="chart-row">
         <section className="card">
-          <h3>Per-model accuracy (before majority vote)</h3>
+          <h3>Per-model accuracy (before majority vote) <Scope>seed {data.default_seed} only</Scope></h3>
           <ResponsiveContainer width="100%" height={260}>
             <BarChart data={perModelRows} layout="vertical" margin={{ top: 5, right: 30, left: 10, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--color-rule)" />
@@ -229,7 +255,7 @@ export default function Dashboard() {
         </section>
 
         <section className="card">
-          <h3>ROC curve (ensemble, AUC={data.roc.auc.toFixed(3)})</h3>
+          <h3>ROC curve (ensemble, AUC={data.roc.auc.toFixed(3)}) <Scope>seed {data.default_seed} only</Scope></h3>
           <ResponsiveContainer width="100%" height={260}>
             <LineChart data={data.roc.points} margin={{ top: 5, right: 20, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--color-rule)" />
@@ -245,7 +271,7 @@ export default function Dashboard() {
 
       {featureImportanceRows && (
         <section className="card">
-          <h3>Top features driving predictions</h3>
+          <h3>Top features driving predictions <Scope>seed {data.default_seed} only</Scope></h3>
           <ResponsiveContainer width="100%" height={340}>
             <BarChart data={featureImportanceRows} layout="vertical" margin={{ top: 5, right: 30, left: 10, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--color-rule)" />

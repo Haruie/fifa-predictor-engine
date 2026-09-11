@@ -33,6 +33,7 @@ async def lifespan(app: FastAPI):
     bundle = load_or_train(cfg, SEEDS)
     state["profiles"] = bundle["profiles"]
     state["reports_by_seed"] = bundle["reports_by_seed"]
+    state["default_seed"] = bundle["default_seed"]
     state["default_report"] = bundle["reports_by_seed"][bundle["default_seed"]]
     yield
 
@@ -46,7 +47,31 @@ app.add_middleware(
 class PredictRequest(BaseModel):
     team_a: str
     team_b: str
-    year: int
+    # Which FIFA edition's squad ratings to use. Omit for the most recent
+    # edition both teams appear in -- that's what a *future* fixture needs,
+    # since there is no player dataset for a tournament that hasn't happened.
+    year: int | None = None
+    # World Cup finals are played at neutral venues, but the model is trained
+    # on home_team/away_team rows where 62.8% of non-neutral matches are home
+    # wins (vs 49.6% on neutral ground). It therefore favours whichever team is
+    # passed as team_a. With neutral=True the match is scored in both
+    # orientations and averaged, so the answer no longer depends on argument
+    # order. Set False only for a fixture with a genuine home side.
+    neutral: bool = True
+
+
+def _latest_shared_year(team_a: str, team_b: str) -> int:
+    """Most recent edition for which BOTH teams have a squad profile."""
+    profiles = state["profiles"]
+    years_a = set(profiles.loc[profiles["team"] == team_a, "year"])
+    years_b = set(profiles.loc[profiles["team"] == team_b, "year"])
+    shared = years_a & years_b
+    if not shared:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No FIFA edition has squad data for both {team_a!r} and {team_b!r}.",
+        )
+    return int(max(shared))
 
 
 @app.get("/teams")
@@ -58,11 +83,11 @@ def teams() -> list[dict]:
     return [{"team": t, "years": sorted(years)} for t, years in sorted(by_team.items())]
 
 
-@app.post("/predict")
-def predict(req: PredictRequest) -> dict:
+def _proba_home_win(team_a: str, team_b: str, year: int) -> dict[str, float]:
+    """Per-model P(team_a wins) for one orientation of a matchup."""
     attrs = state["default_report"].attrs
     try:
-        row = build_single_match_features(req.team_a, req.team_b, req.year, state["profiles"])
+        row = build_single_match_features(team_a, team_b, year, state["profiles"])
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -71,7 +96,28 @@ def predict(req: PredictRequest) -> dict:
     X_final = attrs["pca"].transform(X_scaled) if attrs["pca"] is not None else X_scaled
 
     ensemble = attrs["ensemble"]
-    per_model_proba_a = {name: float(est.predict_proba(X_final)[0][1]) for name, est in ensemble.named_estimators_.items()}
+    return {name: float(est.predict_proba(X_final)[0][1])
+            for name, est in ensemble.named_estimators_.items()}
+
+
+@app.post("/predict")
+def predict(req: PredictRequest) -> dict:
+    if req.team_a == req.team_b:
+        raise HTTPException(status_code=400, detail="Pick two different teams.")
+
+    year = req.year if req.year is not None else _latest_shared_year(req.team_a, req.team_b)
+
+    per_model_proba_a = _proba_home_win(req.team_a, req.team_b, year)
+    if req.neutral:
+        # Score the reversed fixture too and average. P(a wins) from the
+        # reversed run is 1 - P(b wins as home), so the home-side bias the model
+        # learned cancels instead of landing on whichever team was passed first.
+        reversed_proba_b = _proba_home_win(req.team_b, req.team_a, year)
+        per_model_proba_a = {
+            name: (p + (1.0 - reversed_proba_b[name])) / 2.0
+            for name, p in per_model_proba_a.items()
+        }
+
     votes = {name: (req.team_a if p >= 0.5 else req.team_b) for name, p in per_model_proba_a.items()}
     # Each model's confidence in its OWN pick (always >= 0.5).
     model_confidence = {name: (p if p >= 0.5 else 1 - p) for name, p in per_model_proba_a.items()}
@@ -89,7 +135,10 @@ def predict(req: PredictRequest) -> dict:
     return {
         "team_a": req.team_a,
         "team_b": req.team_b,
-        "year": req.year,
+        # The edition actually used, which may differ from what was requested
+        # (or have been chosen here when the caller omitted it).
+        "year": year,
+        "neutral": req.neutral,
         "winner": req.team_a if winner_is_a else req.team_b,
         "confidence": confidence,
         "model_votes": votes,
@@ -126,6 +175,13 @@ def evaluation() -> dict:
         "per_model_accuracy": attrs["per_model_accuracy"].to_dict(),
         "feature_importance": attrs["feature_importance"].to_dict() if attrs["feature_importance"] is not None else None,
         "roc": {"auc": float(attrs["ensemble_auc"]), "points": roc_points},
+        # Every block above except `seed_variance` comes from ONE seed's report
+        # (the default seed). The frontend labels those panels with this value so
+        # they can't be mistaken for the across-seed averages in `seed_variance`
+        # -- on some seeds the baseline beats the ensemble even though the mean
+        # goes the other way.
+        "default_seed": int(state["default_seed"]),
+        "seeds": [int(s) for s in SEEDS],
         "dataset": {
             "n_team_profiles": int(len(state["profiles"])),
             "n_train_matches": int(attrs["n_train"]),

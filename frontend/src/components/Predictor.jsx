@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { getTeams, predict } from '../api'
+import { getTeams, predict, withRetry } from '../api'
 import { MODEL_LABEL } from '../constants'
 
 const DEFAULT_MATCHUP = ['Brazil', 'Germany']
@@ -12,19 +12,31 @@ export default function Predictor() {
   const [result, setResult] = useState(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [starting, setStarting] = useState(false)
+  const [neutral, setNeutral] = useState(true)
 
   useEffect(() => {
-    getTeams().then((data) => {
-      setTeams(data)
-      const names = new Set(data.map((t) => t.team))
-      const [a, b] = DEFAULT_MATCHUP.every((n) => names.has(n))
-        ? DEFAULT_MATCHUP
-        : data.slice(0, 2).map((t) => t.team)
-      if (a && b) {
-        setTeamA(a)
-        setTeamB(b)
-      }
-    }).catch((err) => setError(err.message))
+    let cancelled = false
+    withRetry(getTeams, { onWait: () => !cancelled && setStarting(true) })
+      .then((data) => {
+        if (cancelled) return
+        setStarting(false)
+        setTeams(data)
+        const names = new Set(data.map((t) => t.team))
+        const [a, b] = DEFAULT_MATCHUP.every((n) => names.has(n))
+          ? DEFAULT_MATCHUP
+          : data.slice(0, 2).map((t) => t.team)
+        if (a && b) {
+          setTeamA(a)
+          setTeamB(b)
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return
+        setStarting(false)
+        setError(err.message)
+      })
+    return () => { cancelled = true }
   }, [])
 
   const years = useMemo(() => {
@@ -44,7 +56,7 @@ export default function Predictor() {
     setResult(null)
     setLoading(true)
     try {
-      const data = await predict(teamA, teamB, Number(year))
+      const data = await predict(teamA, teamB, Number(year), neutral)
       setResult(data)
     } catch (err) {
       setError(err.message)
@@ -80,13 +92,33 @@ export default function Predictor() {
         </button>
       </form>
 
+      <p className="field-note">
+        The ensemble is trained on every World Cup match from 2015–2025 at once — this only
+        picks which edition’s squad ratings describe the two teams. Latest shared edition by default.
+      </p>
+
+      <label className="venue-toggle">
+        <input type="checkbox" checked={neutral} onChange={(e) => setNeutral(e.target.checked)} />
+        <span>
+          Neutral venue
+          <span className="venue-note">
+            {neutral
+              ? ' — scored both ways and averaged, so team order doesn’t change the result (World Cup default)'
+              : ' — off: Team A is treated as the home side, which the model favours (62.8% of non-neutral matches are home wins)'}
+          </span>
+        </span>
+      </label>
+
       {teamA && teamB && years.length > 0 && (
         <div className="request-preview">
           <span className="prompt">&gt;</span> predict(team_a=<span className="arg">"{teamA}"</span>, team_b=<span className="arg">"{teamB}"</span>, year=<span className="arg">{year}</span>)
         </div>
       )}
 
-      {!years.length && teamA && teamB && teamA !== teamB && (
+      {starting && (
+        <p className="hint">Waiting for the backend to finish starting up… retrying automatically.</p>
+      )}
+      {!starting && !years.length && teamA && teamB && teamA !== teamB && (
         <p className="hint">No overlapping FIFA edition year for these two teams.</p>
       )}
       {error && <p className="error">{error}</p>}
@@ -95,7 +127,10 @@ export default function Predictor() {
         <div className="result">
           <div className="result-head">
             <span className="result-status">predicted</span>
-            <span className="result-matchup">{result.team_a} vs {result.team_b} · {result.year}</span>
+            <span className="result-matchup">
+              {result.team_a} vs {result.team_b} · FIFA {String(result.year).slice(-2)} squad ratings
+              {result.neutral ? ' · neutral venue' : ` · ${result.team_a} at home`}
+            </span>
           </div>
           <div className="winner">
             <span className="trophy">&gt;</span>{result.winner} wins

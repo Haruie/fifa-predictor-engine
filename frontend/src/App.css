@@ -140,6 +140,39 @@
   cursor: not-allowed;
 }
 
+/* Neutral-venue toggle: the model favours whichever team is passed first, so
+   this is a modelling choice the user should see, not a hidden default. */
+.venue-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6em;
+  margin-top: var(--space-md, 1rem);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--color-graphite-ink);
+  cursor: pointer;
+}
+
+.venue-toggle input {
+  margin-top: 0.15em;
+  accent-color: var(--color-accent-light, oklch(85% 0.06 80));
+  cursor: pointer;
+}
+
+.field-note {
+  margin-top: var(--space-md);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--color-ink-muted, oklch(64% 0.016 77));
+  opacity: 0.8;
+}
+
+.venue-note {
+  color: var(--color-ink-muted, oklch(64% 0.016 77));
+  opacity: 0.8;
+}
+
 .request-preview {
   margin-top: var(--space-lg);
   padding: var(--space-sm) var(--space-md);
@@ -357,6 +390,27 @@
   opacity: 1;
   color: var(--color-accent-light, oklch(85% 0.06 80));
   font-weight: 500;
+}
+
+/* Marks which slice of the evaluation a panel is showing -- one seed's test
+   split vs. an average across all seeds. Deliberately quiet: it qualifies the
+   heading, it isn't part of it. */
+.panel-scope {
+  margin-left: 0.6em;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--color-ink-muted, oklch(64% 0.016 77));
+  opacity: 0.75;
+  white-space: nowrap;
+}
+
+.model-roster .panel-scope {
+  display: block;
+  margin: 0.4em 0 0;
+  white-space: normal;
 }
 
 /* ---------- Consensus (prediction confidence, as % + vote-share bar) ---------- */
