@@ -160,8 +160,9 @@ safe to re-run.
 - [x] Repo scaffolding
 - [x] Data collection (real Kaggle datasets connected: player attributes 2015–2025 — FIFA 15–23,
   EA FC 24 from the same author, EA FC 25 mapped via `src/data/adapters.py` — match history 1872–present)
-- [x] Feature engineering (1749 team-year profiles, 130 raw features -> ~30 PCA components at 95% variance, depending on the split):
-  111 squad-attribute columns, 18 as-of-date match-history columns (`src/features/history_features.py`), and a neutral-venue flag
+- [x] Feature engineering (1749 team-year profiles, 163 raw features -> ~35 PCA components at 95% variance, depending on the split):
+  144 squad columns (means, star-concentration shape, and per-position aggregates), 18 as-of-date match-history columns
+  (`src/features/history_features.py`), and a neutral-venue flag
 - [x] Baseline (WWR) — fit on full World Cup history (finals + qualifiers), test-leakage safe
 - [x] Ensemble models — 5-model majority vote, trained end-to-end on real data (1495 usable matches)
 - [x] Evaluation — accuracy, high/low-scoring split, challenging cases, validated across 5 random seeds
@@ -171,8 +172,8 @@ safe to re-run.
 - [x] Web app (Phase 8) — FastAPI backend (`api/`) + React frontend (`frontend/`): live team-vs-team prediction and an interactive results dashboard
 
 **Latest results** (1495 World Cup matches incl. qualifiers, 5-seed average): ensemble
-**78.5% ± 2.0%** overall accuracy vs. baseline 74.8% ± 2.8% — see `outputs/figures/`.
-The ensemble finishes ahead on all 5 seeds, by between 1.7 and 6.7 points.
+**78.6% ± 1.8%** overall accuracy vs. baseline 74.8% ± 2.8% — see `outputs/figures/`.
+The ensemble finishes ahead on all 5 seeds, by between 1.0 and 7.4 points.
 Run `python -m src.pipeline` to reproduce, or `python -m src.make_figures` to
 regenerate the figures.
 
@@ -192,7 +193,8 @@ Three changes, each measured on its own across all 5 seeds:
 | Starting point | 75.5% ± 2.5% | +0.7 pp | 2 / 5 |
 | \+ `neutral_site` feature | 76.3% ± 2.3% | +1.5 pp | 3 / 5 |
 | \+ as-of-date history features | 78.1% ± 3.0% | +3.3 pp | 4 / 5 |
-| \+ neutral-only row mirroring | **78.5% ± 2.0%** | **+3.7 pp** | **5 / 5** |
+| \+ neutral-only row mirroring | 78.5% ± 2.0% | +3.7 pp | 5 / 5 |
+| \+ squad shape & position aggregation | **78.6% ± 1.8%** | **+3.8 pp** | **5 / 5** |
 
 - **History features** (`src/features/history_features.py`) give the model Elo, the baseline's
   own weighted win ratio, matches played, head-to-head record and recent form. Every value is
@@ -209,8 +211,19 @@ Three changes, each measured on its own across all 5 seeds:
   asserting that the away side of a qualifier had home advantage is simply false. Restricted to
   rows where the ordering really is arbitrary it adds 0.4 points and cuts seed-to-seed spread
   from 3.0 to 2.0 — which is what turns "ahead on 4 of 5 seeds" into "ahead on all 5".
+- **Squad shape and position aggregation** came out of a single bad prediction: Brazil 78% over
+  a Norway side that won 2-1. The squad *mean* was the one statistic making it look lopsided —
+  Brazil 84.4 to Norway's 76.6 — while by top-3 the gap was 1.7 and by best player Norway was
+  ahead (Haaland 91 to 90). The mean measures depth, which wins leagues; a knockout tie is
+  often decided by the best two or three on the pitch. Profiles now also carry `overall_max`,
+  `overall_top3`, `overall_spread` and per-position aggregates. This also surfaced a real bug:
+  the proxy squad for unlicensed federations was "top 23 by `overall`", and since EA rates
+  keepers below outfielders, **58% of those squads contained no goalkeeper** (Algeria 2017's
+  best keeper ranks 32nd in his own nation). Selection now fills a positional quota. Net effect
+  on accuracy is only +0.1 pp — inside the noise — but AUC, seed spread and significance all
+  improve, and Brazil–Norway drops from 78% to 72%.
 
-Per-seed McNemar is still mostly not significant (1 of 5 seeds at p<0.05, p ranging 0.005–0.52,
+Per-seed McNemar reaches p<0.05 on 2 of the 5 seeds (p ranging 0.005–0.52,
 n=299 per test set). What changed is that the margin is positive on every seed rather than two.
 
 ### Held-out test: the 2026 World Cup knockout bracket
@@ -233,7 +246,7 @@ python -m src.backtest_wc2026
 | Semi-finals | 2 | 0% | 50% |
 | **Overall** | **30** | **76.7%** | **66.7%** |
 
-76.7% out of sample sits within the cross-validated 78.5% ± 2.0%, which is the main evidence
+76.7% out of sample sits within the cross-validated 78.6% ± 1.8%, which is the main evidence
 that the model generalises rather than fitting its own test splits. Two caveats keep it honest:
 with n=30 the 95% interval is ±15.1%, so the 10-point margin over the baseline is **not**
 statistically significant; and 4 of the 30 ties were decided on penalties, which the model has
@@ -249,14 +262,14 @@ World Cup final between those two.
 **Beyond overall accuracy**, `python -m src.pipeline` also reports (console + `report.attrs`):
 - Per-model accuracy for each of the 5 base classifiers, before the majority vote
 - Precision / recall / F1 / ROC-AUC (accuracy alone hides the home-win class imbalance)
-- McNemar's test on paired baseline-vs-ensemble predictions — the ~3.7-point accuracy
-  margin reaches p<0.05 on only 1 of the 5 seeds (per-seed p-values range from 0.005 to
+- McNemar's test on paired baseline-vs-ensemble predictions — the ~3.8-point accuracy
+  margin reaches p<0.05 on 2 of the 5 seeds (per-seed p-values range from 0.005 to
   0.52; honest finding, not swept under the rug — see the report's Discussion section).
   With ~299 test rows per seed the test is underpowered for a gap this size; the stronger
   evidence is that the margin is positive on all 5 seeds
 - Ensemble accuracy broken down by vote agreement (3/5, 4/5, 5/5 of the base models agreeing)
 - Feature importance (Random Forest + XGBoost, mapped back from PCA-component space to
-  the original 130 engineered features) — an approximation, since PCA components have no
+  the original 163 engineered features) — an approximation, since PCA components have no
   direct real-world meaning
 
 ## Reference
