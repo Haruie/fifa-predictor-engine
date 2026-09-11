@@ -18,6 +18,11 @@ CACHE_DIR = resolve_path("outputs/models")
 def _cache_key(cfg: dict, seeds: list[int]) -> str:
     relevant = {k: cfg[k] for k in ("data", "features", "baseline", "models", "evaluation")}
     relevant["seeds"] = seeds
+    # random_state picks which seed's report the API serves as the default
+    # (see `default_seed` below), so it has to be part of the key -- otherwise
+    # changing it to another value already in `seeds` hits a stale bundle and
+    # silently keeps serving the previous seed's results.
+    relevant["random_state"] = cfg["project"]["random_state"]
     return hashlib.sha256(json.dumps(relevant, sort_keys=True).encode()).hexdigest()[:16]
 
 

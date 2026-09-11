@@ -55,14 +55,18 @@ def run_seed(cfg: dict, feat: pd.DataFrame, wc_all_history: pd.DataFrame, seed: 
     set_seed(seed)
 
     feature_cols = get_feature_columns(feat)
-    X = feat[feature_cols].fillna(feat[feature_cols].mean())
+    X = feat[feature_cols]
     y = feat["label"]
 
     idx_train, idx_test = train_test_split(
         feat.index, test_size=cfg["models"]["test_size"],
         random_state=seed, stratify=y,
     )
-    X_train, X_test = X.loc[idx_train], X.loc[idx_test]
+    # Impute from the TRAINING split only. Computing the mean over the full
+    # frame first would fold test-set values into the training data, the same
+    # leak that scaling/PCA below are careful to avoid by fitting on train only.
+    train_mean = X.loc[idx_train].mean()
+    X_train, X_test = X.loc[idx_train].fillna(train_mean), X.loc[idx_test].fillna(train_mean)
     y_train, y_test = y.loc[idx_train], y.loc[idx_test]
     test_rows = feat.loc[idx_test]
 
@@ -76,7 +80,7 @@ def run_seed(cfg: dict, feat: pd.DataFrame, wc_all_history: pd.DataFrame, seed: 
         X_train_f, X_test_f = X_train_s, X_test_s
 
     print(f"\nTraining ensemble on {len(X_train_f)} matches, testing on {len(X_test_f)}...")
-    tuned = tune_all_models(X_train_f, y_train, cfg)
+    tuned = tune_all_models(X_train_f, y_train, cfg, seed)
 
     # tune_all_models() returns each model's GridSearchCV.best_estimator_,
     # already refit on the full training set -- so per-model predictions are
@@ -153,7 +157,7 @@ def run_seed(cfg: dict, feat: pd.DataFrame, wc_all_history: pd.DataFrame, seed: 
         mcnemar=significance, agreement_table=agreement_table, feature_importance=feature_importance,
         pca_explained_variance=pca.explained_variance_ratio_ if pca is not None else None,
         ensemble=ensemble, scaler=scaler, pca=pca,
-        feature_cols=feature_cols, train_mean=X[feature_cols].mean(),
+        feature_cols=feature_cols, train_mean=train_mean,
         n_train=len(X_train_f), n_test=len(X_test_f),
     )
     return report
@@ -175,7 +179,13 @@ def run(seeds: list[int] | None = None) -> None:
         reports[seed] = run_seed(cfg, feat, wc_all_history, seed)
 
     if len(seeds) > 1:
-        overall = pd.concat({s: r["Overall Accuracy"] for s, r in reports.items()}, axis=1).T
+        # Build from plain dicts rather than pd.concat: each report carries
+        # numpy arrays in .attrs (y_test, ml_pred, ...), and pandas >= 3 has
+        # concat compare `obj.attrs == attrs` to decide whether to propagate
+        # them -- an array-vs-array `==` returns an array, raising "truth value
+        # of an array ... is ambiguous". Going through .to_dict() drops attrs
+        # before pandas ever looks at them.
+        overall = pd.DataFrame({s: r["Overall Accuracy"].to_dict() for s, r in reports.items()}).T
         print(f"\n{'=' * 20} summary across {len(seeds)} seeds {'=' * 20}")
         print(overall.to_string())
         print("\n" + overall.agg(["mean", "std"]).to_string())

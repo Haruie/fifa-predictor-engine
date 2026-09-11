@@ -21,10 +21,18 @@ from src.config import load_config, resolve_path, set_seed
 from src.models.ensemble import PARAM_GRIDS, build_base_estimators, build_majority_vote_ensemble
 
 
-def tune_all_models(X_train, y_train, cfg: dict) -> dict:
+def tune_all_models(X_train, y_train, cfg: dict, seed: int | None = None) -> dict:
     """Run k-fold CV hyperparameter search for each of the 5 model types and
-    return {name: best_estimator}."""
-    seed = cfg["project"]["random_state"]
+    return {name: best_estimator}.
+
+    Args:
+        seed: seeds both the CV fold shuffle and each estimator's own
+            random_state. Callers running the pipeline over multiple seeds MUST
+            pass the current one -- falling back to cfg's fixed random_state
+            would hold model randomness constant across "different" seeds, so
+            the resulting spread would only reflect train/test split variance.
+    """
+    seed = cfg["project"]["random_state"] if seed is None else seed
     cv = StratifiedKFold(n_splits=cfg["models"]["cv_folds"], shuffle=True, random_state=seed)
 
     base_estimators = build_base_estimators(random_state=seed)
