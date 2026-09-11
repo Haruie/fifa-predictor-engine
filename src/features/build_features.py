@@ -14,34 +14,74 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
 
+def edition_for_match_date(dates: pd.Series, available_years) -> pd.Series:
+    """Which FIFA edition's ratings were current when a match was played.
+
+    The edition labelled year Y ships in about September of Y-1 and describes
+    that season's squads, so it is the current one from Sept Y-1 to Aug Y.
+    Joining on the match's calendar year instead means a fixture played in
+    October reads ratings published thirteen months earlier while a fresher
+    edition already exists -- and 63% of the World Cup matches in scope are
+    played September to December.
+
+    Clamped to the editions actually on disk, so the newest matches fall back
+    to the newest available ratings rather than dropping out of the join.
+    """
+    years = dates.dt.year + (dates.dt.month >= 9).astype(int)
+    return years.clip(lower=min(available_years), upper=max(available_years))
+
+
 def _attach_team_profiles(pairs_df: pd.DataFrame, team_profiles: pd.DataFrame) -> pd.DataFrame:
-    """Join team-year profiles onto each (home_team, away_team, year) row,
-    producing `_a` / `_b` / `_diff` suffixed columns. Shared by
+    """Join team-year profiles onto each (home_team, away_team, profile_year)
+    row, producing `_a` / `_b` / `_diff` suffixed columns. Shared by
     build_match_features (training, needs scores/labels) and
-    build_single_match_features (inference, doesn't)."""
+    build_single_match_features (inference, doesn't).
+
+    `pairs_df` must carry `profile_year` -- the edition to read squads from,
+    which is not necessarily the match's calendar year (see
+    `edition_for_match_date`).
+    """
     profile_cols = [c for c in team_profiles.columns if c not in ("team", "year", "squad_size")]
 
-    a = team_profiles.add_suffix("_a").rename(columns={"team_a": "home_team", "year_a": "year"})
-    b = team_profiles.add_suffix("_b").rename(columns={"team_b": "away_team", "year_b": "year"})
+    a = team_profiles.add_suffix("_a").rename(
+        columns={"team_a": "home_team", "year_a": "profile_year"})
+    b = team_profiles.add_suffix("_b").rename(
+        columns={"team_b": "away_team", "year_b": "profile_year"})
 
-    merged = pairs_df.merge(a, on=["home_team", "year"], how="inner")
-    merged = merged.merge(b, on=["away_team", "year"], how="inner")
+    merged = pairs_df.merge(a, on=["home_team", "profile_year"], how="inner")
+    merged = merged.merge(b, on=["away_team", "profile_year"], how="inner")
 
     for col in profile_cols:
         merged[f"{col}_diff"] = merged[f"{col}_a"] - merged[f"{col}_b"]
 
+    # How much squad actually backs this comparison. Nearly half of all match
+    # rows have at least one side built from fewer than 11 rated players, and
+    # without this the model cannot tell a full 23-man profile from a 2-player
+    # one. The minimum is the right summary: the comparison is only as reliable
+    # as its weaker half.
+    merged["squad_size_min"] = merged[["squad_size_a", "squad_size_b"]].min(axis=1)
+
     return merged
 
 
-def build_match_features(matches_df: pd.DataFrame, team_profiles: pd.DataFrame) -> pd.DataFrame:
+def build_match_features(matches_df: pd.DataFrame, team_profiles: pd.DataFrame,
+                         edition_aware: bool = True) -> pd.DataFrame:
     """Join team-year profiles onto each match for both the home and away team,
     producing one row per match with `_a` / `_b` / `_diff` suffixed columns.
 
     Args:
-        matches_df: must contain home_team, away_team, year (or a date to derive
-            year from), and the outcome columns needed to build the label.
+        matches_df: must contain home_team, away_team, date, year, and the
+            outcome columns needed to build the label.
         team_profiles: output of clean.build_all_team_year_profiles().
+        edition_aware: read squads from the FIFA edition current on the match
+            date rather than the one labelled with the match's calendar year.
+            See `edition_for_match_date`.
     """
+    matches_df = matches_df.copy()
+    matches_df["profile_year"] = (
+        edition_for_match_date(matches_df["date"], team_profiles["year"].unique())
+        if edition_aware else matches_df["year"]
+    )
     merged = _attach_team_profiles(matches_df, team_profiles)
 
     # Drop fixtures with no recorded result BEFORE the draw filter. results.csv
@@ -81,7 +121,11 @@ def build_single_match_features(
             matchup, where treating one side as "home" would invent an
             advantage nobody has.
     """
-    pairs_df = pd.DataFrame([{"home_team": team_a, "away_team": team_b, "year": year}])
+    # `year` here names the edition directly -- a caller asking for a live
+    # prediction picks the squad vintage, so there is no match date to derive
+    # one from.
+    pairs_df = pd.DataFrame([{"home_team": team_a, "away_team": team_b,
+                              "year": year, "profile_year": year}])
     merged = _attach_team_profiles(pairs_df, team_profiles)
     if merged.empty:
         raise ValueError(f"No profile data for {team_a!r} and/or {team_b!r} in {year}")
@@ -118,23 +162,46 @@ def mirror_feature_frame(X: pd.DataFrame) -> pd.DataFrame:
 
 
 # Features describing the fixture rather than either team, so they carry no
-# _a/_b/_diff suffix and have to be listed explicitly. `neutral_site` earns its
-# place: World Cup qualifiers are played home-and-away and the home side wins
-# 63.1% of them, while on neutral ground it is 48.6% -- near a coin flip. Without
-# this column the model blends the two and applies a phantom home advantage to
-# every neutral-venue fixture, which is every match at the tournament itself.
-MATCH_CONTEXT_FEATURES = ("neutral_site",)
+# _a/_b/_diff suffix and have to be listed explicitly.
+#
+# `neutral_site`: World Cup qualifiers are played home-and-away and the home
+# side wins 63.1% of them, while on neutral ground it is 48.6% -- near a coin
+# flip. Without this the model blends the two and applies a phantom home
+# advantage to every neutral-venue fixture, which is every match at the
+# tournament itself.
+#
+# `squad_size_min`: how much squad backs the comparison at all. Symmetric, so
+# mirroring leaves it alone, and it is a level rather than a difference -- which
+# is the point, since two equally thin profiles differ by zero.
+MATCH_CONTEXT_FEATURES = ("neutral_site", "squad_size_min")
 
 
-def get_feature_columns(df: pd.DataFrame) -> list[str]:
-    """Return the *_a, *_b, *_diff engineered columns plus match context,
-    excluding IDs/labels."""
-    exclude = {"home_team", "away_team", "year", "date", "tournament", "label",
-               "home_score", "away_score", "net_score", "neutral",
-               "squad_size_a", "squad_size_b"}
-    suffixed = [c for c in df.columns if c not in exclude and (
-        c.endswith("_a") or c.endswith("_b") or c.endswith("_diff")
-    )]
+def get_feature_columns(df: pd.DataFrame, representation: str = "all") -> list[str]:
+    """Return the engineered feature columns plus match context.
+
+    Args:
+        representation: "all" keeps `_a`, `_b` and `_diff`; "diff" keeps only
+            the differences. `_diff` is exactly `_a - _b`, so the triple is
+            collinear by construction and costs 3x the dimensionality for no
+            extra information about which side is stronger. Measured over 5
+            seeds, dropping to differences alone holds accuracy (78.66% vs
+            78.93%) while cutting seed-to-seed spread from 1.89 to 0.60 -- the
+            absolute levels mostly contribute variance. See config
+            `features.representation`.
+    """
+    exclude = {"home_team", "away_team", "year", "profile_year", "date",
+               "tournament", "label", "home_score", "away_score", "net_score",
+               "neutral", "squad_size_a", "squad_size_b", "squad_size_diff"}
+
+    if representation == "diff":
+        suffixes = ("_diff",)
+    elif representation == "all":
+        suffixes = ("_a", "_b", "_diff")
+    else:
+        raise ValueError(f"unknown feature representation {representation!r}; "
+                         "expected 'all' or 'diff'")
+
+    suffixed = [c for c in df.columns if c not in exclude and c.endswith(suffixes)]
     return suffixed + [c for c in MATCH_CONTEXT_FEATURES if c in df.columns]
 
 

@@ -160,20 +160,20 @@ safe to re-run.
 - [x] Repo scaffolding
 - [x] Data collection (real Kaggle datasets connected: player attributes 2015–2025 — FIFA 15–23,
   EA FC 24 from the same author, EA FC 25 mapped via `src/data/adapters.py` — match history 1872–present)
-- [x] Feature engineering (1749 team-year profiles, 163 raw features -> ~35 PCA components at 95% variance, depending on the split):
-  144 squad columns (means, star-concentration shape, and per-position aggregates), 18 as-of-date match-history columns
-  (`src/features/history_features.py`), and a neutral-venue flag
+- [x] Feature engineering (1749 team-year profiles, 56 features -> ~20 PCA components at 95% variance, depending on the split):
+  one `<attr>_diff` per squad attribute (means, star-concentration shape, per-position aggregates), 6 as-of-date match-history
+  differences (`src/features/history_features.py`), plus neutral-venue and squad-size context
 - [x] Baseline (WWR) — fit on full World Cup history (finals + qualifiers), test-leakage safe
-- [x] Ensemble models — 5-model majority vote, trained end-to-end on real data (1495 usable matches)
+- [x] Ensemble models — 5-model majority vote, trained end-to-end on real data (1504 usable matches)
 - [x] Evaluation — accuracy, high/low-scoring split, challenging cases, validated across 5 random seeds
 - [x] Report figures (`outputs/figures/`: accuracy comparison, seed variance, confusion matrices,
   PCA variance, ROC curve, per-model accuracy, feature importance)
 - [x] Report writing (Phase 7) — `report/report.md` / `report/report.pdf`
 - [x] Web app (Phase 8) — FastAPI backend (`api/`) + React frontend (`frontend/`): live team-vs-team prediction and an interactive results dashboard
 
-**Latest results** (1495 World Cup matches incl. qualifiers, 5-seed average): ensemble
-**78.9% ± 1.9%** overall accuracy vs. baseline 74.8% ± 2.8% — see `outputs/figures/`.
-The ensemble finishes ahead on all 5 seeds, by between 2.3 and 6.4 points.
+**Latest results** (1504 World Cup matches incl. qualifiers, 5-seed average): ensemble
+**80.3% ± 3.2%** overall accuracy vs. baseline 74.9% ± 2.7% — see `outputs/figures/`.
+The ensemble finishes ahead on all 5 seeds, by between 2.0 and 9.3 points.
 Run `python -m src.pipeline` to reproduce, or `python -m src.make_figures` to
 regenerate the figures.
 
@@ -195,7 +195,9 @@ Three changes, each measured on its own across all 5 seeds:
 | \+ as-of-date history features | 78.1% ± 3.0% | +3.3 pp | 4 / 5 |
 | \+ neutral-only row mirroring | 78.5% ± 2.0% | +3.7 pp | 5 / 5 |
 | \+ squad shape & position aggregation | 78.6% ± 1.8% | +3.8 pp | 5 / 5 |
-| \+ goal-difference-weighted Elo | **78.9% ± 1.9%** | **+4.2 pp** | **5 / 5** |
+| \+ goal-difference-weighted Elo | 78.9% ± 1.9% | +4.2 pp | 5 / 5 |
+| \+ `_diff`-only representation | 78.8% ± 1.1 | +4.0 pp | 5 / 5 |
+| \+ edition-aware squad join | **80.3% ± 3.2%** | **+5.3 pp** | **5 / 5** |
 
 - **History features** (`src/features/history_features.py`) give the model Elo, the baseline's
   own weighted win ratio, matches played, head-to-head record and recent form. Every value is
@@ -240,8 +242,40 @@ Three changes, each measured on its own across all 5 seeds:
   multiplier is kept: margin of victory is real evidence no other feature carries per match.
   It is left in the code behind `features.history_elo_competition_weighted` for re-measuring.
 
+- **`_diff`-only representation and an edition-aware squad join** came out of a full audit.
+  `<attr>_a`, `<attr>_b` and `<attr>_diff` are collinear by construction, and `h2h_winrate`'s
+  three columns are correlated at r = 1.0000 exactly — 163 features carrying far less than 163
+  features' worth of information. Dropping to differences alone (163 → 56) held accuracy and
+  cut seed spread from 1.9 to 1.1. The bigger win was the join: FIFA edition *Y* ships around
+  September of *Y−1*, but squads were being looked up by the match's **calendar year**, and 63%
+  of matches in scope are played September–December — so most fixtures were reading ratings a
+  median of 12 months old while a fresher edition already existed. Joining on the edition
+  current at the match date moves 55% of rows onto newer squads and is worth **+1.5 pp**, the
+  largest single gain of any change here. It does widen seed spread (1.1 → 3.2), which is the
+  one cost.
+- **Squad-size reliability did not work**, in either form. Profiles are built from whoever EA
+  rated, so a "team" can be 2 players: 33% of match rows have a side under 5, and 48% under 11.
+  Exposing `squad_size_min` as a feature moved nothing (−0.06 pp), and *filtering* thin training
+  rows was actively harmful — −0.9 pp at a threshold of 11 and −3.1 pp at 18. The lost volume
+  costs more than the added noise. The feature is kept (it is one column and genuinely
+  describes the row); `features.min_squad_size` ships at 0.
+
 Per-seed McNemar reaches p<0.05 on 2 of the 5 seeds (p ranging 0.012–0.41,
 n=299 per test set). What changed is that the margin is positive on every seed rather than two.
+
+#### Validity checks
+
+Two things that would invalidate the headline number were tested directly rather than assumed:
+
+- **Is the random split hiding that this trains on the future?** No. Splitting *temporally*
+  instead — train on everything up to 2024-10-15, predict the 295 matches after it — gives
+  **79.7% ± 0.7% against the baseline's 77.0%**. Accuracy does not drop, so the random-split
+  figure is not inflated by hindsight, and the forecasting framing is defensible.
+- **Is the baseline handicapped?** Slightly, and it was worth checking: the ensemble's history
+  features are built from all 49,520 international matches while the WWR baseline is fit on the
+  9,839 World Cup ones — a 5× information edge. Giving the baseline the full record moves it
+  from 74.8% to 74.9%, so the like-for-like margin is **+4.0 pp rather than +4.2 pp** at the
+  point that was measured. Real, but small enough that it does not change the conclusion.
 
 ### Held-out test: the 2026 World Cup knockout bracket
 
@@ -263,7 +297,7 @@ python -m src.backtest_wc2026
 | Semi-finals | 2 | 50% | 50% |
 | **Overall** | **30** | **86.7%** | **66.7%** |
 
-86.7% out of sample sits above the cross-validated 78.9% ± 1.9%, which is the main evidence
+86.7% out of sample sits above the cross-validated 80.3% ± 3.2%, which is the main evidence
 that the model generalises rather than fitting its own test splits — though *above* is itself a
 warning sign rather than a triumph. The goal-difference Elo change was worth +0.33 pp in
 cross-validation and appears to be worth +10 pp here; that gap is three matches out of thirty,
@@ -282,14 +316,14 @@ World Cup final between those two.
 **Beyond overall accuracy**, `python -m src.pipeline` also reports (console + `report.attrs`):
 - Per-model accuracy for each of the 5 base classifiers, before the majority vote
 - Precision / recall / F1 / ROC-AUC (accuracy alone hides the home-win class imbalance)
-- McNemar's test on paired baseline-vs-ensemble predictions — the ~4.2-point accuracy
+- McNemar's test on paired baseline-vs-ensemble predictions — the ~5.3-point accuracy
   margin reaches p<0.05 on 2 of the 5 seeds (per-seed p-values range from 0.005 to
   0.41; honest finding, not swept under the rug — see the report's Discussion section).
   With ~299 test rows per seed the test is underpowered for a gap this size; the stronger
   evidence is that the margin is positive on all 5 seeds
 - Ensemble accuracy broken down by vote agreement (3/5, 4/5, 5/5 of the base models agreeing)
 - Feature importance (Random Forest + XGBoost, mapped back from PCA-component space to
-  the original 163 engineered features) — an approximation, since PCA components have no
+  the original 56 engineered features) — an approximation, since PCA components have no
   direct real-world meaning
 
 ## Reference

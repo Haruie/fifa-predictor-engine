@@ -12,6 +12,7 @@ import pytest
 from src.features.build_features import (
     build_match_features,
     build_single_match_features,
+    edition_for_match_date,
     get_feature_columns,
 )
 
@@ -113,3 +114,77 @@ def test_unknown_team_or_year_raises(profiles):
         build_single_match_features("A", "Nowhere", 2018, profiles)
     with pytest.raises(ValueError):
         build_single_match_features("A", "B", 1998, profiles)
+
+
+# -- edition-aware join --------------------------------------------------
+
+
+@pytest.mark.parametrize("date,expected", [
+    ("2018-01-15", 2018),   # Jan: edition 2018 shipped Sept 2017, still current
+    ("2018-06-14", 2018),   # the World Cup itself -- the pre-tournament rating
+    ("2018-08-31", 2018),   # last day before the next edition ships
+    ("2018-09-01", 2019),   # edition 2019 has shipped; it is now the fresher one
+    ("2018-11-20", 2019),
+    ("2018-12-31", 2019),
+])
+def test_edition_for_match_date(date, expected):
+    got = edition_for_match_date(pd.Series([pd.Timestamp(date)]), range(2015, 2026))
+    assert got.iloc[0] == expected
+
+
+def test_edition_is_clamped_to_available_years():
+    """Nov 2025 wants edition 2026, which is not on disk -- it must fall back to
+    the newest available rather than dropping the match from the join."""
+    got = edition_for_match_date(pd.Series([pd.Timestamp("2025-11-18")]), range(2015, 2026))
+    assert got.iloc[0] == 2025
+
+    early = edition_for_match_date(pd.Series([pd.Timestamp("2010-03-01")]), range(2015, 2026))
+    assert early.iloc[0] == 2015
+
+
+def test_edition_aware_join_reads_the_newer_edition(profiles):
+    """A November match must pick up the following edition's squad."""
+    two_years = pd.concat([
+        profiles,
+        profiles.assign(year=2019, overall=profiles["overall"] + 10.0),
+    ], ignore_index=True)
+    november = pd.DataFrame([_match("A", "B", 2, 1, date="2018-11-20")])
+
+    aware = build_match_features(november, two_years, edition_aware=True).reset_index(drop=True)
+    calendar = build_match_features(november, two_years, edition_aware=False).reset_index(drop=True)
+
+    assert aware.loc[0, "profile_year"] == 2019
+    assert calendar.loc[0, "profile_year"] == 2018
+    assert aware.loc[0, "overall_a"] == calendar.loc[0, "overall_a"] + 10.0
+
+
+# -- representation and reliability --------------------------------------
+
+
+def test_representation_diff_drops_the_levels(profiles):
+    feat = build_match_features(pd.DataFrame([_match("A", "B", 2, 1)]), profiles)
+    all_cols = get_feature_columns(feat, "all")
+    diff_cols = get_feature_columns(feat, "diff")
+
+    assert len(diff_cols) < len(all_cols)
+    assert not any(c.endswith(("_a", "_b")) for c in diff_cols)
+    assert "overall_diff" in diff_cols
+    # Match context survives both representations -- it has no _diff form.
+    assert "neutral_site" in diff_cols and "neutral_site" in all_cols
+
+
+def test_unknown_representation_raises(profiles):
+    feat = build_match_features(pd.DataFrame([_match("A", "B", 2, 1)]), profiles)
+    with pytest.raises(ValueError, match="representation"):
+        get_feature_columns(feat, "levels-only")
+
+
+def test_squad_size_min_is_the_weaker_profile(profiles):
+    thin = profiles.copy()
+    thin.loc[thin["team"] == "B", "squad_size"] = 3
+    feat = build_match_features(pd.DataFrame([_match("A", "B", 2, 1)]), thin).reset_index(drop=True)
+
+    assert feat.loc[0, "squad_size_min"] == 3
+    assert "squad_size_min" in get_feature_columns(feat, "diff")
+    # The raw per-side sizes stay out: only the binding constraint is a feature.
+    assert "squad_size_a" not in get_feature_columns(feat, "all")

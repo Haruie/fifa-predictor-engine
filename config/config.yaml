@@ -28,6 +28,27 @@ features:
   use_pca: true
   pca_variance_threshold: 0.95   # keep components explaining >= this much variance
 
+  # "all" keeps <attr>_a, <attr>_b and <attr>_diff; "diff" keeps only the
+  # difference. The three are collinear by construction (diff == a - b), so the
+  # triple costs 3x the dimensionality for no extra information about which side
+  # is stronger. Measured over 5 seeds: 78.93% +/- 1.89 with all three (163
+  # features) vs 78.66% +/- 0.60 with differences alone (55 features) -- the
+  # absolute levels buy 0.3 pp of accuracy and triple the seed-to-seed spread.
+  representation: diff
+
+  # Read squads from the FIFA edition current on the match date rather than the
+  # one labelled with the calendar year. Edition Y ships ~Sept Y-1, and 63% of
+  # World Cup matches in scope are played Sept-Dec, so a calendar-year join
+  # hands those fixtures ratings a median of 12 months old.
+  edition_aware_join: true
+
+  # Drop training rows whose weaker profile is built from fewer than this many
+  # rated players. 0 disables. Profiles are assembled from whoever EA rated, so
+  # a "team" can be 2 players: 17.9% of team-slots come from fewer than 5, and
+  # 46.5% of match rows have at least one side under 11. The model also gets
+  # squad_size_min as a feature either way, so it can discount thin rows itself.
+  min_squad_size: 0
+
   # Hand the ensemble the match-history signal the WWR baseline runs on: Elo,
   # the baseline's own weighted win ratio, head-to-head record and recent form.
   # Without these the ensemble sees squad ratings only while the baseline sees

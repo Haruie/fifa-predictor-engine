@@ -57,7 +57,10 @@ def build_match_dataset(cfg: dict, profiles: pd.DataFrame):
         matches, include_qualifiers=cfg["data"].get("include_qualifiers", False)
     )
     wc_scope = wc_all_history[wc_all_history["year"].isin(cfg["data"]["years"])]
-    feat = build_match_features(wc_scope, profiles)
+    feat = build_match_features(
+        wc_scope, profiles,
+        edition_aware=cfg["features"].get("edition_aware_join", False),
+    )
 
     history_state = None
     if cfg["features"].get("history_features", False):
@@ -87,7 +90,7 @@ def run_seed(cfg: dict, feat: pd.DataFrame, wc_all_history: pd.DataFrame, seed: 
     comparison report (overall / high-scoring / low-scoring accuracy rows)."""
     set_seed(seed)
 
-    feature_cols = get_feature_columns(feat)
+    feature_cols = get_feature_columns(feat, cfg["features"].get("representation", "all"))
     X = feat[feature_cols]
     y = feat["label"]
 
@@ -95,6 +98,17 @@ def run_seed(cfg: dict, feat: pd.DataFrame, wc_all_history: pd.DataFrame, seed: 
         feat.index, test_size=cfg["models"]["test_size"],
         random_state=seed, stratify=y,
     )
+
+    min_squad = cfg["features"].get("min_squad_size", 0)
+    if min_squad:
+        # Training rows only. The test set keeps its thin-profile matches on
+        # purpose: they are part of the population the model is asked about, so
+        # filtering them from the evaluation would flatter the score rather than
+        # improve the model.
+        thin = feat.loc[idx_train, "squad_size_min"] < min_squad
+        idx_train = idx_train[~thin.to_numpy()]
+        print(f"Squad filter: dropped {int(thin.sum())} training rows with a "
+              f"profile under {min_squad} players -> {len(idx_train)} remain")
     # Impute from the TRAINING split only. Computing the mean over the full
     # frame first would fold test-set values into the training data, the same
     # leak that scaling/PCA below are careful to avoid by fitting on train only.
