@@ -35,6 +35,7 @@ async def lifespan(app: FastAPI):
     state["reports_by_seed"] = bundle["reports_by_seed"]
     state["default_seed"] = bundle["default_seed"]
     state["default_report"] = bundle["reports_by_seed"][bundle["default_seed"]]
+    state["history_state"] = bundle.get("history_state")
     yield
 
 
@@ -83,11 +84,14 @@ def teams() -> list[dict]:
     return [{"team": t, "years": sorted(years)} for t, years in sorted(by_team.items())]
 
 
-def _proba_home_win(team_a: str, team_b: str, year: int) -> dict[str, float]:
+def _proba_home_win(team_a: str, team_b: str, year: int, neutral: bool = True) -> dict[str, float]:
     """Per-model P(team_a wins) for one orientation of a matchup."""
     attrs = state["default_report"].attrs
     try:
-        row = build_single_match_features(team_a, team_b, year, state["profiles"])
+        row = build_single_match_features(
+            team_a, team_b, year, state["profiles"], state.get("history_state"),
+            neutral=neutral,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -107,12 +111,12 @@ def predict(req: PredictRequest) -> dict:
 
     year = req.year if req.year is not None else _latest_shared_year(req.team_a, req.team_b)
 
-    per_model_proba_a = _proba_home_win(req.team_a, req.team_b, year)
+    per_model_proba_a = _proba_home_win(req.team_a, req.team_b, year, req.neutral)
     if req.neutral:
         # Score the reversed fixture too and average. P(a wins) from the
         # reversed run is 1 - P(b wins as home), so the home-side bias the model
         # learned cancels instead of landing on whichever team was passed first.
-        reversed_proba_b = _proba_home_win(req.team_b, req.team_a, year)
+        reversed_proba_b = _proba_home_win(req.team_b, req.team_a, year, req.neutral)
         per_model_proba_a = {
             name: (p + (1.0 - reversed_proba_b[name])) / 2.0
             for name, p in per_model_proba_a.items()

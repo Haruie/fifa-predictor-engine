@@ -34,13 +34,17 @@ def load_or_train(cfg: dict, seeds: list[int]) -> dict:
         return joblib.load(cache_file)
 
     profiles = build_team_profiles(cfg)
-    feat, wc_all_history = build_match_dataset(cfg, profiles)
+    feat, wc_all_history, history_state = build_match_dataset(cfg, profiles)
     reports_by_seed = {s: run_seed(cfg, feat, wc_all_history, s) for s in seeds}
 
     bundle = {
         "profiles": profiles,
         "reports_by_seed": reports_by_seed,
         "default_seed": cfg["project"]["random_state"],
+        # Team strength as of the last recorded match. /predict needs it to
+        # build the same history features training saw; None when the model was
+        # trained with features.history_features off.
+        "history_state": history_state,
     }
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     joblib.dump(bundle, cache_file)

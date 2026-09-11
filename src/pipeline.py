@@ -23,7 +23,14 @@ from src.evaluation.evaluate import (
     per_model_accuracy,
     roc_auc,
 )
-from src.features.build_features import apply_pca, build_match_features, get_feature_columns, scale_features
+from src.features.build_features import (
+    apply_pca,
+    build_match_features,
+    get_feature_columns,
+    mirror_feature_frame,
+    scale_features,
+)
+from src.features.history_features import HISTORY_FEATURES, build_history_features
 from src.models.baseline import WeightedWinRatioBaseline
 from src.models.ensemble import build_majority_vote_ensemble
 from src.models.train import tune_all_models
@@ -36,32 +43,105 @@ def build_team_profiles(cfg: dict) -> pd.DataFrame:
     return build_all_team_year_profiles(squad)
 
 
-def build_match_dataset(cfg: dict, profiles: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def split_holdout(cfg: dict, feat: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split the feature frame into (development, holdout) by year.
+
+    The holdout is not a test set in the usual sense -- `run_seed` already
+    carves one of those out of development for each seed. It is insurance
+    against everything those splits have been used for: every configuration
+    compared, kept or discarded on them. See `evaluation.holdout_years`.
+    """
+    years = cfg["evaluation"].get("holdout_years") or []
+    if not years:
+        return feat, feat.iloc[0:0]
+    is_holdout = feat["year"].isin(years)
+    return feat[~is_holdout].copy(), feat[is_holdout].copy()
+
+
+def build_match_dataset(cfg: dict, profiles: pd.DataFrame, apply_holdout: bool = True):
     """Returns (feature-engineered matches in project scope, full WC match
-    history) -- the latter is kept around so the baseline can be fit on all
-    available World Cup history, not just the years with player-feature data.
+    history, history state).
+
+    The WC history is kept around so the baseline can be fit on all available
+    World Cup history, not just the years with player-feature data. The history
+    state is the running team-strength snapshot after the whole record, which
+    inference needs to build the same history features training saw.
     """
     matches = load_match_data(cfg)
     wc_all_history = filter_world_cup_matches(
         matches, include_qualifiers=cfg["data"].get("include_qualifiers", False)
     )
     wc_scope = wc_all_history[wc_all_history["year"].isin(cfg["data"]["years"])]
-    return build_match_features(wc_scope, profiles), wc_all_history
+    feat = build_match_features(
+        wc_scope, profiles,
+        edition_aware=cfg["features"].get("edition_aware_join", False),
+    )
+
+    history_state = None
+    if cfg["features"].get("history_features", False):
+        # Computed from the FULL international record rather than World Cup
+        # matches alone: Elo and form need volume, and a team's friendlies and
+        # continental fixtures are evidence about it even though the baseline
+        # never looks at them. As-of-date by construction, so widening the pool
+        # adds information without adding leakage.
+        history_feats, history_state = build_history_features(
+            feat, matches,
+            wwr_m=cfg["baseline"]["wwr_m"],
+            form_window=cfg["features"].get("history_form_window", 10),
+            elo_k=cfg["features"].get("history_elo_k", 20),
+            elo_home_advantage=cfg["features"].get("history_elo_home_advantage", 60),
+            elo_competition_weighted=cfg["features"].get("history_elo_competition_weighted", False),
+            elo_goal_difference_weighted=cfg["features"].get("history_elo_goal_difference_weighted", False),
+        )
+        feat = pd.concat([feat, history_feats], axis=1)
+        print(f"History features: {history_feats.shape[1]} added "
+              f"({', '.join(HISTORY_FEATURES)}), as of each match date")
+
+    if apply_holdout:
+        feat, holdout = split_holdout(cfg, feat)
+        if len(holdout):
+            print(f"Holdout: {len(holdout)} matches from "
+                  f"{cfg['evaluation']['holdout_years']} withheld -- "
+                  f"{len(feat)} available for development")
+
+    return feat, wc_all_history, history_state
 
 
-def run_seed(cfg: dict, feat: pd.DataFrame, wc_all_history: pd.DataFrame, seed: int) -> pd.DataFrame:
+def run_seed(cfg: dict, feat: pd.DataFrame, wc_all_history: pd.DataFrame, seed: int,
+             idx_train=None, idx_test=None) -> pd.DataFrame:
     """Run one train/test split + fit/eval cycle at the given seed. Returns the
-    comparison report (overall / high-scoring / low-scoring accuracy rows)."""
+    comparison report (overall / high-scoring / low-scoring accuracy rows).
+
+    Args:
+        idx_train, idx_test: explicit row indices, for callers that need a split
+            other than the stratified random one -- `src/holdout.py` passes the
+            whole development set and the withheld years. Supplying these keeps
+            imputation, mirroring, scaling, PCA, tuning and the baseline
+            identical to a normal run, which is the point: the holdout number
+            has to describe the same pipeline that produced everything else.
+    """
     set_seed(seed)
 
-    feature_cols = get_feature_columns(feat)
+    feature_cols = get_feature_columns(feat, cfg["features"].get("representation", "all"))
     X = feat[feature_cols]
     y = feat["label"]
 
-    idx_train, idx_test = train_test_split(
-        feat.index, test_size=cfg["models"]["test_size"],
-        random_state=seed, stratify=y,
-    )
+    if idx_train is None or idx_test is None:
+        idx_train, idx_test = train_test_split(
+            feat.index, test_size=cfg["models"]["test_size"],
+            random_state=seed, stratify=y,
+        )
+
+    min_squad = cfg["features"].get("min_squad_size", 0)
+    if min_squad:
+        # Training rows only. The test set keeps its thin-profile matches on
+        # purpose: they are part of the population the model is asked about, so
+        # filtering them from the evaluation would flatter the score rather than
+        # improve the model.
+        thin = feat.loc[idx_train, "squad_size_min"] < min_squad
+        idx_train = idx_train[~thin.to_numpy()]
+        print(f"Squad filter: dropped {int(thin.sum())} training rows with a "
+              f"profile under {min_squad} players -> {len(idx_train)} remain")
     # Impute from the TRAINING split only. Computing the mean over the full
     # frame first would fold test-set values into the training data, the same
     # leak that scaling/PCA below are careful to avoid by fitting on train only.
@@ -69,6 +149,26 @@ def run_seed(cfg: dict, feat: pd.DataFrame, wc_all_history: pd.DataFrame, seed: 
     X_train, X_test = X.loc[idx_train].fillna(train_mean), X.loc[idx_test].fillna(train_mean)
     y_train, y_test = y.loc[idx_train], y.loc[idx_test]
     test_rows = feat.loc[idx_test]
+
+    if cfg["features"].get("mirror_training_rows", False):
+        # Only neutral-venue rows. At a neutral venue which team results.csv
+        # lists as "home" is arbitrary (48.6% home wins, near a coin flip), so a
+        # side-swapped copy is a second true observation. Qualifiers are not
+        # neutral and the home side really does win 63.1% of them -- mirroring
+        # those would assert the away team had home advantage, injecting a
+        # falsehood, and measurably costs ~2 points of accuracy.
+        #
+        # Strictly after the split, too: mirroring first would put a row and its
+        # own copy on opposite sides, i.e. the same match in train and test.
+        # Imputing first keeps the fill value the real training mean.
+        mirror_mask = feat.loc[idx_train, "neutral_site"].astype(bool).to_numpy()
+        n_mirrored = int(mirror_mask.sum())
+        X_train = pd.concat(
+            [X_train, mirror_feature_frame(X_train[mirror_mask])], ignore_index=True
+        )
+        y_train = pd.concat([y_train, 1 - y_train[mirror_mask]], ignore_index=True)
+        print(f"Mirroring: +{n_mirrored} side-swapped neutral-venue rows "
+              f"-> {len(X_train)} training rows")
 
     X_train_s, X_test_s, scaler = scale_features(X_train, X_test, cfg["features"]["scaler"])
     pca = None
@@ -169,7 +269,7 @@ def run(seeds: list[int] | None = None) -> None:
     train/test split and model fitting are seed-dependent."""
     cfg = load_config()
     profiles = build_team_profiles(cfg)
-    feat, wc_all_history = build_match_dataset(cfg, profiles)
+    feat, wc_all_history, _history_state = build_match_dataset(cfg, profiles)
     print(f"Team-year profiles: {len(profiles)} | Matches usable for modeling: {len(feat)}")
 
     seeds = seeds or [cfg["project"]["random_state"]]

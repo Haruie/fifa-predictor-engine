@@ -28,6 +28,65 @@ features:
   use_pca: true
   pca_variance_threshold: 0.95   # keep components explaining >= this much variance
 
+  # "all" keeps <attr>_a, <attr>_b and <attr>_diff; "diff" keeps only the
+  # difference. The three are collinear by construction (diff == a - b), so the
+  # triple costs 3x the dimensionality for no extra information about which side
+  # is stronger. Measured over 5 seeds: 78.93% +/- 1.89 with all three (163
+  # features) vs 78.66% +/- 0.60 with differences alone (55 features) -- the
+  # absolute levels buy 0.3 pp of accuracy and triple the seed-to-seed spread.
+  representation: diff
+
+  # Read squads from the FIFA edition current on the match date rather than the
+  # one labelled with the calendar year. Edition Y ships ~Sept Y-1, and 63% of
+  # World Cup matches in scope are played Sept-Dec, so a calendar-year join
+  # hands those fixtures ratings a median of 12 months old.
+  edition_aware_join: true
+
+  # Drop training rows whose weaker profile is built from fewer than this many
+  # rated players. 0 disables. Profiles are assembled from whoever EA rated, so
+  # a "team" can be 2 players: 17.9% of team-slots come from fewer than 5, and
+  # 46.5% of match rows have at least one side under 11. The model also gets
+  # squad_size_min as a feature either way, so it can discount thin rows itself.
+  min_squad_size: 0
+
+  # Hand the ensemble the match-history signal the WWR baseline runs on: Elo,
+  # the baseline's own weighted win ratio, head-to-head record and recent form.
+  # Without these the ensemble sees squad ratings only while the baseline sees
+  # results only -- they score within a point of each other while disagreeing
+  # on a third of matches, so neither dominates and the ensemble is never
+  # given what the baseline knows. Every value is computed as of the match
+  # date, so nothing sees a result that had not happened yet.
+  # See src/features/history_features.py.
+  history_features: true
+  history_form_window: 10        # matches per team in the recent-form window
+  history_elo_k: 20              # flat Elo update rate, used only when competition weighting is off
+  history_elo_home_advantage: 60 # Elo points, applied only on non-neutral ground
+  # World Football Elo weighting (eloratings.net), measured over 5 seeds:
+  #
+  #   flat K=20                    78.60% +/- 1.75   margin +3.81 pp
+  #   + competition weighting      78.26% +/- 1.27   margin +3.48 pp   (-0.33)
+  #   + goal-difference weighting  78.93% +/- 1.89   margin +4.15 pp   (+0.33)
+  #   + both                       78.13% +/- 1.99   margin +3.34 pp   (-0.47)
+  #
+  # So competition weighting is OFF despite being the textbook choice. Setting K
+  # from the tournament (World Cup 60 ... friendly 20) makes every rating move
+  # faster and so more reactive to recent results -- which is what form_win and
+  # form_gd already measure. What the ensemble wants from Elo is the stable
+  # long-run reputation a flat K gives it. The implementation stays available;
+  # flip this to true to re-measure.
+  history_elo_competition_weighted: false
+  # Margin of victory, with diminishing returns, is kept: a 4-0 is stronger
+  # evidence than a 1-0 and that is not something form_gd captures per match.
+  history_elo_goal_difference_weighted: true
+
+  # Append a side-swapped copy of every TRAINING row (_a <-> _b, _diff negated,
+  # label flipped). World Cup matches are played on neutral ground but
+  # results.csv still lists one team as "home", and 61% of rows are home wins,
+  # so without mirroring the model learns argument order as if it were signal.
+  # Mirroring happens after the split, never before -- a row and its mirror
+  # landing on opposite sides of the split would be direct leakage.
+  mirror_training_rows: true
+
 # Weighted Win Ratio baseline, per paper Section IV
 baseline:
   min_head_to_head_matches: 5    # 75th percentile threshold from the paper
@@ -47,3 +106,18 @@ evaluation:
   # A match is "high-scoring" if combined goals >= this threshold (tune during EDA)
   high_scoring_goal_threshold: 3
   output_dir: outputs
+
+  # Years withheld from development entirely. `build_match_dataset()` drops them,
+  # so nothing in these years reaches feature selection, hyperparameter tuning,
+  # seed-variance reporting, the figures, or the served model -- the only way to
+  # see them is `python -m src.holdout`, which scores them once.
+  #
+  # Why this exists: roughly fifteen configurations were compared against the
+  # same five random splits, keeping whichever scored higher each time. That is
+  # selection on the test set, and it accumulates -- the random-split number
+  # drifted up 78.9% -> 80.3% while an untuned temporal split went 79.7% ->
+  # 79.5%, i.e. the last round of "gains" did not replicate. A number that has
+  # never been optimised against is the only one worth publishing.
+  #
+  # Set to [] to train on everything (and lose the guarantee).
+  holdout_years: [2025]

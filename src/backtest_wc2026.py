@@ -26,6 +26,7 @@ import pandas as pd
 from src.config import load_config, resolve_path, set_seed
 from src.data.collect_matches import load_match_data
 from src.features.build_features import build_single_match_features
+from src.features.history_features import build_history_state
 
 # Group stage is the first 72 of the 104 matches (12 groups x 6); everything
 # from 2026-06-28 on is knockout. Round boundaries are date ranges, since
@@ -40,6 +41,7 @@ ROUNDS = [
 ]
 
 PROFILE_YEAR = 2025  # latest squad data that predates the tournament
+TOURNAMENT_START = "2026-06-11"  # opening match; history features are cut here
 
 
 def _load_model(cfg: dict):
@@ -51,10 +53,16 @@ def _load_model(cfg: dict):
     return bundle["profiles"], report.attrs
 
 
-def predict_winner(team_a: str, team_b: str, profiles, attrs, year: int = PROFILE_YEAR) -> tuple[str, float]:
-    """Neutral-venue (order-invariant) winner + confidence for one tie."""
+def predict_winner(team_a: str, team_b: str, profiles, attrs, history_state=None,
+                   year: int = PROFILE_YEAR) -> tuple[str, float]:
+    """Neutral-venue (order-invariant) winner + confidence for one tie.
+
+    `history_state` must be built from matches BEFORE the tournament. Reusing
+    the state the training pipeline ends on would fold the very 2026 results
+    being predicted into the features doing the predicting.
+    """
     def proba_a(a: str, b: str) -> np.ndarray:
-        row = build_single_match_features(a, b, year, profiles)
+        row = build_single_match_features(a, b, year, profiles, history_state, neutral=True)
         X = row[attrs["feature_cols"]].fillna(attrs["train_mean"])
         X = attrs["scaler"].transform(X)
         if attrs["pca"] is not None:
@@ -107,8 +115,21 @@ def run() -> None:
         wwr_m=cfg["baseline"]["wwr_m"],
     ).fit(history[history["year"] < 2026])
 
+    # Team strength as it stood the day before the opening match. Cut from the
+    # full international record, matching how the training features were built.
+    history_state = build_history_state(
+        matches[matches["date"] < pd.Timestamp(TOURNAMENT_START)],
+        wwr_m=cfg["baseline"]["wwr_m"],
+        form_window=cfg["features"].get("history_form_window", 10),
+        elo_k=cfg["features"].get("history_elo_k", 20),
+        elo_home_advantage=cfg["features"].get("history_elo_home_advantage", 60),
+        elo_competition_weighted=cfg["features"].get("history_elo_competition_weighted", False),
+        elo_goal_difference_weighted=cfg["features"].get("history_elo_goal_difference_weighted", False),
+    ) if cfg["features"].get("history_features", False) else None
+
     print(f"Model: trained on {cfg['data']['years'][0]}-{cfg['data']['years'][-1]}, "
-          f"no 2026 match seen. Team strength from EA FC {PROFILE_YEAR - 2000} squads.\n")
+          f"no 2026 match seen. Team strength from EA FC {PROFILE_YEAR - 2000} squads"
+          + (f", match history cut at {TOURNAMENT_START}.\n" if history_state is not None else ".\n"))
 
     rows, unresolved = [], []
     for name, start, end in ROUNDS:
@@ -118,7 +139,8 @@ def run() -> None:
         print(f"{'=' * 72}\n{name}\n{'=' * 72}")
         for _, r in tie_rows.iterrows():
             try:
-                pred, conf = predict_winner(r["home_team"], r["away_team"], profiles, attrs)
+                pred, conf = predict_winner(r["home_team"], r["away_team"], profiles,
+                                            attrs, history_state)
             except ValueError as exc:
                 print(f"  {r['home_team']} vs {r['away_team']}: SKIPPED -- {exc}")
                 continue
