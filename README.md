@@ -172,8 +172,8 @@ safe to re-run.
 - [x] Web app (Phase 8) — FastAPI backend (`api/`) + React frontend (`frontend/`): live team-vs-team prediction and an interactive results dashboard
 
 **Latest results** (1495 World Cup matches incl. qualifiers, 5-seed average): ensemble
-**78.6% ± 1.8%** overall accuracy vs. baseline 74.8% ± 2.8% — see `outputs/figures/`.
-The ensemble finishes ahead on all 5 seeds, by between 1.0 and 7.4 points.
+**78.9% ± 1.9%** overall accuracy vs. baseline 74.8% ± 2.8% — see `outputs/figures/`.
+The ensemble finishes ahead on all 5 seeds, by between 2.3 and 6.4 points.
 Run `python -m src.pipeline` to reproduce, or `python -m src.make_figures` to
 regenerate the figures.
 
@@ -194,7 +194,8 @@ Three changes, each measured on its own across all 5 seeds:
 | \+ `neutral_site` feature | 76.3% ± 2.3% | +1.5 pp | 3 / 5 |
 | \+ as-of-date history features | 78.1% ± 3.0% | +3.3 pp | 4 / 5 |
 | \+ neutral-only row mirroring | 78.5% ± 2.0% | +3.7 pp | 5 / 5 |
-| \+ squad shape & position aggregation | **78.6% ± 1.8%** | **+3.8 pp** | **5 / 5** |
+| \+ squad shape & position aggregation | 78.6% ± 1.8% | +3.8 pp | 5 / 5 |
+| \+ goal-difference-weighted Elo | **78.9% ± 1.9%** | **+4.2 pp** | **5 / 5** |
 
 - **History features** (`src/features/history_features.py`) give the model Elo, the baseline's
   own weighted win ratio, matches played, head-to-head record and recent form. Every value is
@@ -222,8 +223,24 @@ Three changes, each measured on its own across all 5 seeds:
   best keeper ranks 32nd in his own nation). Selection now fills a positional quota. Net effect
   on accuracy is only +0.1 pp — inside the noise — but AUC, seed spread and significance all
   improve, and Brazil–Norway drops from 78% to 72%.
+- **Elo weighting**, following the World Football Elo convention, split in two when measured
+  separately — and only half of it survived:
 
-Per-seed McNemar reaches p<0.05 on 2 of the 5 seeds (p ranging 0.005–0.52,
+  | | accuracy | margin | vs flat K=20 |
+  |---|---|---|---|
+  | flat K=20 | 78.60% ± 1.75 | +3.8 pp | reference |
+  | competition-weighted (WC 60 … friendly 20) | 78.26% ± 1.27 | +3.5 pp | −0.33 pp |
+  | goal-difference multiplier | **78.93% ± 1.89** | **+4.2 pp** | **+0.33 pp** |
+  | both | 78.13% ± 1.99 | +3.3 pp | −0.47 pp |
+
+  Competition weighting is the textbook choice and it made things slightly worse on 4 of 5
+  seeds. Tying K to the tournament makes every rating move faster, so Elo becomes reactive to
+  recent results — which is what `form_win` and `form_gd` already measure. What the ensemble
+  wants from Elo is the stable long-run reputation a flat K gives it. The goal-difference
+  multiplier is kept: margin of victory is real evidence no other feature carries per match.
+  It is left in the code behind `features.history_elo_competition_weighted` for re-measuring.
+
+Per-seed McNemar reaches p<0.05 on 2 of the 5 seeds (p ranging 0.012–0.41,
 n=299 per test set). What changed is that the margin is positive on every seed rather than two.
 
 ### Held-out test: the 2026 World Cup knockout bracket
@@ -240,19 +257,22 @@ python -m src.backtest_wc2026
 
 | Round | Ties | Ensemble | Baseline |
 |---|---|---|---|
-| Round of 32 | 16 | 81% | 50% |
-| Round of 16 | 8 | 75% | 88% |
+| Round of 32 | 16 | 88% | 50% |
+| Round of 16 | 8 | 88% | 88% |
 | Quarter-finals | 4 | 100% | 100% |
-| Semi-finals | 2 | 0% | 50% |
-| **Overall** | **30** | **76.7%** | **66.7%** |
+| Semi-finals | 2 | 50% | 50% |
+| **Overall** | **30** | **86.7%** | **66.7%** |
 
-76.7% out of sample sits within the cross-validated 78.6% ± 1.8%, which is the main evidence
-that the model generalises rather than fitting its own test splits. Two caveats keep it honest:
-with n=30 the 95% interval is ±15.1%, so the 10-point margin over the baseline is **not**
+86.7% out of sample sits above the cross-validated 78.9% ± 1.9%, which is the main evidence
+that the model generalises rather than fitting its own test splits — though *above* is itself a
+warning sign rather than a triumph. The goal-difference Elo change was worth +0.33 pp in
+cross-validation and appears to be worth +10 pp here; that gap is three matches out of thirty,
+so most of it is luck, and the cross-validated figure is the one to quote. Two more caveats:
+with n=30 the 95% interval is ±12.2%, so the 20-point margin over the baseline is **not**
 statistically significant; and 4 of the 30 ties were decided on penalties, which the model has
 no way to represent — it predicts a 90-minute winner and is scored against the shootout result.
 
-The model got both semi-finals wrong, picking France over Spain and England over Argentina.
+The model still gets one semi-final wrong, picking England over Argentina.
 
 Neither the third-place playoff nor the final has a recorded score in this dataset, so both are
 genuine forward predictions: **England** to finish third (56%), and **Spain** to beat Argentina
@@ -262,9 +282,9 @@ World Cup final between those two.
 **Beyond overall accuracy**, `python -m src.pipeline` also reports (console + `report.attrs`):
 - Per-model accuracy for each of the 5 base classifiers, before the majority vote
 - Precision / recall / F1 / ROC-AUC (accuracy alone hides the home-win class imbalance)
-- McNemar's test on paired baseline-vs-ensemble predictions — the ~3.8-point accuracy
+- McNemar's test on paired baseline-vs-ensemble predictions — the ~4.2-point accuracy
   margin reaches p<0.05 on 2 of the 5 seeds (per-seed p-values range from 0.005 to
-  0.52; honest finding, not swept under the rug — see the report's Discussion section).
+  0.41; honest finding, not swept under the rug — see the report's Discussion section).
   With ~299 test rows per seed the test is underpowered for a gap this size; the stronger
   evidence is that the margin is positive on all 5 seeds
 - Ensemble accuracy broken down by vote agreement (3/5, 4/5, 5/5 of the base models agreeing)

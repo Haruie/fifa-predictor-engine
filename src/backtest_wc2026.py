@@ -123,6 +123,8 @@ def run() -> None:
         form_window=cfg["features"].get("history_form_window", 10),
         elo_k=cfg["features"].get("history_elo_k", 20),
         elo_home_advantage=cfg["features"].get("history_elo_home_advantage", 60),
+        elo_competition_weighted=cfg["features"].get("history_elo_competition_weighted", False),
+        elo_goal_difference_weighted=cfg["features"].get("history_elo_goal_difference_weighted", False),
     ) if cfg["features"].get("history_features", False) else None
 
     print(f"Model: trained on {cfg['data']['years'][0]}-{cfg['data']['years'][-1]}, "

@@ -16,6 +16,8 @@ from src.features.history_features import (
     HistoryState,
     build_history_features,
     build_history_state,
+    competition_weight,
+    goal_difference_multiplier,
     history_feature_columns,
 )
 from src.models.baseline import WeightedWinRatioBaseline
@@ -161,3 +163,76 @@ def test_history_feature_columns_are_all_present():
     history = _one_sided_history()
     feats, _ = build_history_features(history, history)
     assert list(feats.columns) == history_feature_columns()
+
+
+# -- Elo weighting -------------------------------------------------------
+
+
+@pytest.mark.parametrize("tournament,expected", [
+    ("FIFA World Cup", 60.0),
+    ("UEFA Euro", 50.0),
+    ("Copa América", 50.0),          # accented, as it appears in results.csv
+    ("African Cup of Nations", 50.0),
+    ("FIFA World Cup qualification", 40.0),
+    ("UEFA Nations League", 40.0),
+    ("CECAFA Cup", 30.0),            # unrecognised tournament -> the middle tier
+    ("Friendly", 20.0),
+    (None, 30.0),
+])
+def test_competition_weight(tournament, expected):
+    assert competition_weight(tournament) == expected
+
+
+def test_competition_weight_ignores_accent_encoding():
+    """results.csv ships 'Copa América'; a byte-level comparison would miss it."""
+    assert competition_weight("Copa America") == competition_weight("Copa América")
+
+
+@pytest.mark.parametrize("gd,expected", [
+    (0, 1.0), (1, 1.0), (-1, 1.0), (2, 1.5), (-2, 1.5),
+    (3, 1.75), (5, 2.0),
+])
+def test_goal_difference_multiplier(gd, expected):
+    assert goal_difference_multiplier(gd) == pytest.approx(expected)
+
+
+def test_goal_difference_multiplier_is_monotonic_with_diminishing_returns():
+    steps = [goal_difference_multiplier(g) for g in range(1, 10)]
+    assert steps == sorted(steps)
+    gaps = [b - a for a, b in zip(steps, steps[1:])]
+    assert gaps[0] > gaps[-1]  # a rout must not dominate the rating
+
+
+def test_weighting_flags_are_off_by_default():
+    """Default must stay flat-K, so an omitted config key cannot silently
+    change every rating in the project."""
+    state = HistoryState()
+    assert state.elo_competition_weighted is False
+    assert state.elo_goal_difference_weighted is False
+
+
+def test_competition_weighting_moves_a_world_cup_result_more_than_a_friendly():
+    def gain(tournament, weighted):
+        s = HistoryState(elo_k=20.0, elo_competition_weighted=weighted)
+        s.update("A", "B", 1, 0, neutral=True, tournament=tournament)
+        return s.elo["A"] - ELO_START
+
+    assert gain("FIFA World Cup", True) > gain("Friendly", True)
+    # ...and with weighting off, the competition makes no difference at all.
+    assert gain("FIFA World Cup", False) == pytest.approx(gain("Friendly", False))
+
+
+def test_goal_difference_weighting_moves_a_rout_more_than_a_narrow_win():
+    def gain(hs, aws, weighted):
+        s = HistoryState(elo_k=20.0, elo_goal_difference_weighted=weighted)
+        s.update("A", "B", hs, aws, neutral=True)
+        return s.elo["A"] - ELO_START
+
+    assert gain(4, 0, True) > gain(1, 0, True)
+    assert gain(4, 0, False) == pytest.approx(gain(1, 0, False))
+
+
+def test_elo_stays_zero_sum_under_weighting():
+    s = HistoryState(elo_competition_weighted=True, elo_goal_difference_weighted=True)
+    s.update("A", "B", 5, 0, neutral=True, tournament="FIFA World Cup")
+    assert s.elo["A"] + s.elo["B"] == pytest.approx(2 * ELO_START)

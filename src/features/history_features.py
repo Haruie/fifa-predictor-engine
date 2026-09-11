@@ -32,6 +32,7 @@ Two properties matter more than the specific feature list:
 """
 from __future__ import annotations
 
+import unicodedata
 from collections import deque
 
 import numpy as np
@@ -42,6 +43,60 @@ import pandas as pd
 HISTORY_FEATURES = ("elo", "wwr", "played", "h2h_winrate", "form_win", "form_gd")
 
 ELO_START = 1500.0
+
+# Match importance, following the World Football Elo Ratings convention
+# (eloratings.net). A flat K treats a June friendly as evidence equal to a World
+# Cup quarter-final, which inflates the rating of nations that play many
+# low-stakes matches -- Brazil's rating rests on 1,059 matches, most of them
+# friendlies and continental fixtures.
+ELO_WEIGHT_WORLD_CUP = 60.0
+ELO_WEIGHT_CONTINENTAL = 50.0
+ELO_WEIGHT_QUALIFIER = 40.0
+ELO_WEIGHT_OTHER_TOURNAMENT = 30.0
+ELO_WEIGHT_FRIENDLY = 20.0
+
+# Matched against an accent-stripped, lowercased tournament name, so the
+# encoding of "Copa América" in the source file cannot cause a silent miss.
+_CONTINENTAL_FINALS = frozenset({
+    "uefa euro", "copa america", "african cup of nations", "afc asian cup",
+    "gold cup", "concacaf championship", "oceania nations cup",
+    "confederations cup",
+})
+
+
+def _normalise_tournament(name: str) -> str:
+    return (unicodedata.normalize("NFKD", str(name))
+            .encode("ascii", "ignore").decode("ascii").lower().strip())
+
+
+def competition_weight(tournament) -> float:
+    """K-factor for a match, from the competition it was played in."""
+    if not isinstance(tournament, str):
+        return ELO_WEIGHT_OTHER_TOURNAMENT
+    name = _normalise_tournament(tournament)
+    if name == "fifa world cup":
+        return ELO_WEIGHT_WORLD_CUP
+    if name in _CONTINENTAL_FINALS:
+        return ELO_WEIGHT_CONTINENTAL
+    if "qualification" in name or "nations league" in name:
+        return ELO_WEIGHT_QUALIFIER
+    if name == "friendly":
+        return ELO_WEIGHT_FRIENDLY
+    return ELO_WEIGHT_OTHER_TOURNAMENT
+
+
+def goal_difference_multiplier(goal_difference: int) -> float:
+    """Scale the update by margin of victory, again per eloratings.net.
+
+    A 4-0 win is stronger evidence than a 1-0 win, but with diminishing returns
+    so a rout does not dominate the rating.
+    """
+    margin = abs(int(goal_difference))
+    if margin <= 1:
+        return 1.0
+    if margin == 2:
+        return 1.5
+    return (11.0 + margin) / 8.0
 
 
 class HistoryState:
@@ -54,11 +109,15 @@ class HistoryState:
     """
 
     def __init__(self, wwr_m: float = 10.0, form_window: int = 10,
-                 elo_k: float = 20.0, elo_home_advantage: float = 60.0):
+                 elo_k: float = 20.0, elo_home_advantage: float = 60.0,
+                 elo_competition_weighted: bool = False,
+                 elo_goal_difference_weighted: bool = False):
         self.wwr_m = wwr_m
         self.form_window = form_window
         self.elo_k = elo_k
         self.elo_home_advantage = elo_home_advantage
+        self.elo_competition_weighted = elo_competition_weighted
+        self.elo_goal_difference_weighted = elo_goal_difference_weighted
 
         self.elo: dict[str, float] = {}
         self.played: dict[str, int] = {}
@@ -134,7 +193,7 @@ class HistoryState:
     # -- writes ------------------------------------------------------------
 
     def update(self, home: str, away: str, home_score: float, away_score: float,
-               neutral: bool = False) -> None:
+               neutral: bool = False, tournament=None) -> None:
         """Fold one played match into the state. Unplayed fixtures are skipped."""
         if pd.isna(home_score) or pd.isna(away_score):
             return
@@ -150,7 +209,12 @@ class HistoryState:
             actual_home = 0.0
         else:
             actual_home = 0.5
-        adjustment = self.elo_k * (actual_home - expected_home)
+
+        k = competition_weight(tournament) if self.elo_competition_weighted else self.elo_k
+        if self.elo_goal_difference_weighted:
+            k *= goal_difference_multiplier(home_score - away_score)
+
+        adjustment = k * (actual_home - expected_home)
         self.elo[home] = elo_home + adjustment
         self.elo[away] = elo_away - adjustment
 
@@ -182,6 +246,15 @@ def history_feature_columns() -> list[str]:
     return [f"{name}_{side}" for name in HISTORY_FEATURES for side in ("a", "b", "diff")]
 
 
+def _update_from_row(state: HistoryState, row, has_neutral: bool) -> None:
+    """Apply one itertuples row to the state, tolerating absent optional columns."""
+    state.update(
+        row.home_team, row.away_team, row.home_score, row.away_score,
+        neutral=bool(getattr(row, "neutral", False)) if has_neutral else False,
+        tournament=getattr(row, "tournament", None),
+    )
+
+
 def build_history_state(history: pd.DataFrame, **kwargs) -> HistoryState:
     """Advance a fresh state through `history` and return it, taking no
     snapshots.
@@ -195,10 +268,7 @@ def build_history_state(history: pd.DataFrame, **kwargs) -> HistoryState:
     state = HistoryState(**kwargs)
     has_neutral = "neutral" in history.columns
     for row in history.sort_values("date", kind="stable").itertuples(index=False):
-        state.update(
-            row.home_team, row.away_team, row.home_score, row.away_score,
-            neutral=bool(getattr(row, "neutral", False)) if has_neutral else False,
-        )
+        _update_from_row(state, row, has_neutral)
     return state
 
 
@@ -209,6 +279,8 @@ def build_history_features(
     form_window: int = 10,
     elo_k: float = 20.0,
     elo_home_advantage: float = 60.0,
+    elo_competition_weighted: bool = False,
+    elo_goal_difference_weighted: bool = False,
 ) -> tuple[pd.DataFrame, HistoryState]:
     """As-of-date history features for every row of `targets`.
 
@@ -226,7 +298,9 @@ def build_history_features(
         strength as of the last recorded match.
     """
     state = HistoryState(wwr_m=wwr_m, form_window=form_window, elo_k=elo_k,
-                         elo_home_advantage=elo_home_advantage)
+                         elo_home_advantage=elo_home_advantage,
+                         elo_competition_weighted=elo_competition_weighted,
+                         elo_goal_difference_weighted=elo_goal_difference_weighted)
 
     # (date, home, away) -> the target rows wanting a snapshot at that fixture.
     # A list, because the same fixture key can legitimately appear twice in the
@@ -252,10 +326,7 @@ def build_history_features(
                 for idx in wanted[key]:
                     snapshots[idx] = snap
         for row in rows:
-            state.update(
-                row.home_team, row.away_team, row.home_score, row.away_score,
-                neutral=bool(getattr(row, "neutral", False)) if has_neutral else False,
-            )
+            _update_from_row(state, row, has_neutral)
 
     missing = [idx for idx in targets.index if idx not in snapshots]
     if missing:

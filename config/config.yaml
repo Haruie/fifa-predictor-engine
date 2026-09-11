@@ -38,8 +38,25 @@ features:
   # See src/features/history_features.py.
   history_features: true
   history_form_window: 10        # matches per team in the recent-form window
-  history_elo_k: 20              # Elo update rate
+  history_elo_k: 20              # flat Elo update rate, used only when competition weighting is off
   history_elo_home_advantage: 60 # Elo points, applied only on non-neutral ground
+  # World Football Elo weighting (eloratings.net), measured over 5 seeds:
+  #
+  #   flat K=20                    78.60% +/- 1.75   margin +3.81 pp
+  #   + competition weighting      78.26% +/- 1.27   margin +3.48 pp   (-0.33)
+  #   + goal-difference weighting  78.93% +/- 1.89   margin +4.15 pp   (+0.33)
+  #   + both                       78.13% +/- 1.99   margin +3.34 pp   (-0.47)
+  #
+  # So competition weighting is OFF despite being the textbook choice. Setting K
+  # from the tournament (World Cup 60 ... friendly 20) makes every rating move
+  # faster and so more reactive to recent results -- which is what form_win and
+  # form_gd already measure. What the ensemble wants from Elo is the stable
+  # long-run reputation a flat K gives it. The implementation stays available;
+  # flip this to true to re-measure.
+  history_elo_competition_weighted: false
+  # Margin of victory, with diminishing returns, is kept: a 4-0 is stronger
+  # evidence than a 1-0 and that is not something form_gd captures per match.
+  history_elo_goal_difference_weighted: true
 
   # Append a side-swapped copy of every TRAINING row (_a <-> _b, _diff negated,
   # label flipped). World Cup matches are played on neutral ground but
