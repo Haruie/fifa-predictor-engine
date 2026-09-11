@@ -126,7 +126,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     profiles = build_team_profiles(cfg)
-    feat, wc_all_history = build_match_dataset(cfg, profiles)
+    feat, wc_all_history, _history_state = build_match_dataset(cfg, profiles)
 
     reports_by_seed = {s: run_seed(cfg, feat, wc_all_history, s) for s in SEEDS}
     default_report = reports_by_seed[cfg["project"]["random_state"]]

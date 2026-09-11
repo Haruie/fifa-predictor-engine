@@ -153,7 +153,7 @@ def check_pipeline(full: bool) -> bool:
     started = time.time()
     cfg = load_config()
     profiles = build_team_profiles(cfg)
-    feat, wc_all_history = build_match_dataset(cfg, profiles)
+    feat, wc_all_history, _history_state = build_match_dataset(cfg, profiles)
     print(f"\n  team-year profiles : {len(profiles)}")
     print(f"  usable matches     : {len(feat)}")
     print(f"  WC history rows    : {len(wc_all_history)}\n")

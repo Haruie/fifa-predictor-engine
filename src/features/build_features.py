@@ -54,28 +54,88 @@ def build_match_features(matches_df: pd.DataFrame, team_profiles: pd.DataFrame) 
     merged = merged[merged["home_score"] != merged["away_score"]].copy()
     merged["label"] = (merged["home_score"] > merged["away_score"]).astype(int)  # 1 = Team A (home) wins
 
+    # Numeric copy of results.csv's `neutral` flag, so it can be a model feature
+    # (see MATCH_CONTEXT_FEATURES) and so mirroring can tell which rows have an
+    # arbitrary side ordering.
+    merged["neutral_site"] = merged["neutral"].astype(float) if "neutral" in merged else 0.0
+
     return merged
 
 
-def build_single_match_features(team_a: str, team_b: str, year: int, team_profiles: pd.DataFrame) -> pd.DataFrame:
+def build_single_match_features(
+    team_a: str, team_b: str, year: int, team_profiles: pd.DataFrame,
+    history_state=None, neutral: bool = True,
+) -> pd.DataFrame:
     """One-row feature frame for an arbitrary team pair with no known outcome,
     for live prediction. Raises ValueError if either team has no profile for
-    that year (or they've never played, which can't happen for a single pair)."""
+    that year (or they've never played, which can't happen for a single pair).
+
+    Args:
+        history_state: the `HistoryState` returned by `build_history_features`,
+            holding team strength as of the last recorded match. Required
+            whenever the model was trained with history features on, since the
+            feature columns it expects would otherwise be missing; omit it only
+            for a squad-attributes-only model.
+        neutral: whether the fixture is at a neutral venue. Defaults True --
+            World Cup matches are, and it is the safe default for a hypothetical
+            matchup, where treating one side as "home" would invent an
+            advantage nobody has.
+    """
     pairs_df = pd.DataFrame([{"home_team": team_a, "away_team": team_b, "year": year}])
     merged = _attach_team_profiles(pairs_df, team_profiles)
     if merged.empty:
         raise ValueError(f"No profile data for {team_a!r} and/or {team_b!r} in {year}")
+
+    merged["neutral_site"] = float(neutral)
+
+    if history_state is not None:
+        for col, value in history_state.snapshot(team_a, team_b).items():
+            merged[col] = value
     return merged
 
 
+def mirror_feature_frame(X: pd.DataFrame) -> pd.DataFrame:
+    """Side-swapped copy of a feature frame: `_a` <-> `_b`, `_diff` negated.
+
+    Pairs with a flipped label to teach the model that side is arbitrary. Relies
+    only on the naming convention, so it covers squad attributes and history
+    features alike with no per-feature knowledge.
+    """
+    renames = {}
+    for col in X.columns:
+        if col.endswith("_a"):
+            renames[col] = f"{col[:-2]}_b"
+        elif col.endswith("_b"):
+            renames[col] = f"{col[:-2]}_a"
+
+    mirrored = X.rename(columns=renames)
+    diff_cols = [c for c in X.columns if c.endswith("_diff")]
+    mirrored[diff_cols] = -mirrored[diff_cols]
+    # rename() reorders nothing, but the a/b swap means positions no longer
+    # match the caller's column order -- restore it so the frame stays a
+    # drop-in for the original.
+    return mirrored[X.columns]
+
+
+# Features describing the fixture rather than either team, so they carry no
+# _a/_b/_diff suffix and have to be listed explicitly. `neutral_site` earns its
+# place: World Cup qualifiers are played home-and-away and the home side wins
+# 63.1% of them, while on neutral ground it is 48.6% -- near a coin flip. Without
+# this column the model blends the two and applies a phantom home advantage to
+# every neutral-venue fixture, which is every match at the tournament itself.
+MATCH_CONTEXT_FEATURES = ("neutral_site",)
+
+
 def get_feature_columns(df: pd.DataFrame) -> list[str]:
-    """Return the *_a, *_b, *_diff engineered columns, excluding IDs/labels."""
+    """Return the *_a, *_b, *_diff engineered columns plus match context,
+    excluding IDs/labels."""
     exclude = {"home_team", "away_team", "year", "date", "tournament", "label",
-               "home_score", "away_score", "net_score", "neutral_site",
+               "home_score", "away_score", "net_score", "neutral",
                "squad_size_a", "squad_size_b"}
-    return [c for c in df.columns if c not in exclude and (
+    suffixed = [c for c in df.columns if c not in exclude and (
         c.endswith("_a") or c.endswith("_b") or c.endswith("_diff")
     )]
+    return suffixed + [c for c in MATCH_CONTEXT_FEATURES if c in df.columns]
 
 
 def scale_features(X_train: pd.DataFrame, X_test: pd.DataFrame, scaler_type: str = "standard"):

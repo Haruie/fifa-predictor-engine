@@ -28,6 +28,27 @@ features:
   use_pca: true
   pca_variance_threshold: 0.95   # keep components explaining >= this much variance
 
+  # Hand the ensemble the match-history signal the WWR baseline runs on: Elo,
+  # the baseline's own weighted win ratio, head-to-head record and recent form.
+  # Without these the ensemble sees squad ratings only while the baseline sees
+  # results only -- they score within a point of each other while disagreeing
+  # on a third of matches, so neither dominates and the ensemble is never
+  # given what the baseline knows. Every value is computed as of the match
+  # date, so nothing sees a result that had not happened yet.
+  # See src/features/history_features.py.
+  history_features: true
+  history_form_window: 10        # matches per team in the recent-form window
+  history_elo_k: 20              # Elo update rate
+  history_elo_home_advantage: 60 # Elo points, applied only on non-neutral ground
+
+  # Append a side-swapped copy of every TRAINING row (_a <-> _b, _diff negated,
+  # label flipped). World Cup matches are played on neutral ground but
+  # results.csv still lists one team as "home", and 61% of rows are home wins,
+  # so without mirroring the model learns argument order as if it were signal.
+  # Mirroring happens after the split, never before -- a row and its mirror
+  # landing on opposite sides of the split would be direct leakage.
+  mirror_training_rows: true
+
 # Weighted Win Ratio baseline, per paper Section IV
 baseline:
   min_head_to_head_matches: 5    # 75th percentile threshold from the paper
