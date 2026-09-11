@@ -86,16 +86,70 @@ GOALKEEPING_COLUMNS = ["goalkeeping_diving", "goalkeeping_handling", "goalkeepin
 # would make every 2025 profile an imputed value.
 RATING_COLUMNS = ["overall"]
 
+# EA's six headline summaries. They are not redundant with the detailed
+# attributes below -- EA computes them as position-weighted composites, so they
+# encode how EA itself trades those attributes off. Null for goalkeepers in
+# every source (keepers get the goalkeeping_* block instead), which is why the
+# 80% completeness filter keeps them only just.
+AGGREGATE_COLUMNS = ["pace", "shooting", "passing", "dribbling", "defending", "physic"]
+
+# Present in every source including FC 25. `value_eur`, `wage_eur`,
+# `international_reputation` and `potential` are deliberately absent from this
+# list: the FC 25 database carries none of them, so including any would make
+# every 2025 profile an imputed value.
+TRAIT_COLUMNS = ["skill_moves", "weak_foot"]
+
 ALL_COLUMNS = (
-    METADATA_COLUMNS + RATING_COLUMNS + ATTACKING_COLUMNS + SKILL_COLUMNS
-    + MOVEMENT_COLUMNS + POWER_COLUMNS + MENTALITY_COLUMNS + DEFENDING_COLUMNS
-    + GOALKEEPING_COLUMNS
+    METADATA_COLUMNS + RATING_COLUMNS + AGGREGATE_COLUMNS + TRAIT_COLUMNS
+    + ATTACKING_COLUMNS + SKILL_COLUMNS + MOVEMENT_COLUMNS + POWER_COLUMNS
+    + MENTALITY_COLUMNS + DEFENDING_COLUMNS + GOALKEEPING_COLUMNS
 )
 
 
 def _edition_for_year(year: int) -> int:
     """Map a roster year (e.g. 2021) to its FIFA game edition number (e.g. 21)."""
     return year - 2000
+
+
+# Editions published after stefanoleone992 stopped, which come from other
+# authors with their own schemas. Mapped onto the canonical columns by
+# src/data/adapters.py. Kept here rather than in the loop so `players_2025.csv`
+# is reproducible from a clean checkout -- it previously had to be built by
+# hand, which is how eight mappable columns stayed unmapped without anyone
+# noticing.
+MODERN_SOURCES = {
+    2025: ("nyagami/ea-sports-fc-25-database-ratings-and-stats", "male_players.csv", "FC25"),
+    2026: ("justdhia/ea-sports-fc-26-player-ratings", "ea_fc26_players.csv", "FC26"),
+}
+
+
+def _download_modern_edition(year: int, raw_dir, target_csv) -> None:
+    """Download a post-FIFA-23 edition and normalize it into the canonical schema."""
+    from src.data.adapters import FC25_COLUMN_MAP, FC26_COLUMN_MAP, normalize_modern_players
+
+    slug, member, schema = MODERN_SOURCES[year]
+    column_map = {"FC25": FC25_COLUMN_MAP, "FC26": FC26_COLUMN_MAP}[schema]
+
+    print(f"[{year}] downloading {slug} ({schema} schema) ...")
+    result = subprocess.run(
+        [sys.executable, "-m", "kaggle", "datasets", "download", "-d", slug, "-p", str(raw_dir)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"[{year}] FAILED: {result.stderr.strip()}")
+        return
+
+    zip_path = raw_dir / f"{slug.split('/')[-1]}.zip"
+    with zipfile.ZipFile(zip_path) as zf:
+        if member not in zf.namelist():
+            print(f"[{year}] FAILED: '{member}' not in zip; contents: {zf.namelist()}")
+            zip_path.unlink(missing_ok=True)
+            return
+        raw = pd.read_csv(zf.open(member), low_memory=False)
+    zip_path.unlink(missing_ok=True)
+
+    normalize_modern_players(raw, column_map).to_csv(target_csv, index=False)
+    print(f"[{year}] saved -> {target_csv} ({len(raw)} players)")
 
 
 def download_player_data(cfg: dict | None = None) -> None:
@@ -116,6 +170,10 @@ def download_player_data(cfg: dict | None = None) -> None:
 
         if target_csv.exists():
             print(f"[{year}] already downloaded -> {target_csv}")
+            continue
+
+        if year in MODERN_SOURCES:
+            _download_modern_edition(year, raw_dir, target_csv)
             continue
 
         print(f"[{year}] downloading {slug} ...")

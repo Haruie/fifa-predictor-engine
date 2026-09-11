@@ -160,20 +160,35 @@ safe to re-run.
 - [x] Repo scaffolding
 - [x] Data collection (real Kaggle datasets connected: player attributes 2015–2025 — FIFA 15–23,
   EA FC 24 from the same author, EA FC 25 mapped via `src/data/adapters.py` — match history 1872–present)
-- [x] Feature engineering (1749 team-year profiles, 56 features -> ~20 PCA components at 95% variance, depending on the split):
-  one `<attr>_diff` per squad attribute (means, star-concentration shape, per-position aggregates), 6 as-of-date match-history
-  differences (`src/features/history_features.py`), plus neutral-venue and squad-size context
+- [x] Feature engineering (1749 team-year profiles, 64 features -> ~23 PCA components at 95% variance):
+  one `<attr>_diff` per squad attribute (means, star-concentration shape, per-position aggregates, EA's six aggregate
+  ratings), 6 as-of-date match-history differences (`src/features/history_features.py`), plus neutral-venue and
+  squad-size context
 - [x] Baseline (WWR) — fit on full World Cup history (finals + qualifiers), test-leakage safe
-- [x] Ensemble models — 5-model majority vote, trained end-to-end on real data (1504 usable matches)
+- [x] Ensemble models — 5-model majority vote, trained end-to-end on real data (1504 usable matches, 1223 after the 2025 holdout is withheld)
 - [x] Evaluation — accuracy, high/low-scoring split, challenging cases, validated across 5 random seeds
 - [x] Report figures (`outputs/figures/`: accuracy comparison, seed variance, confusion matrices,
   PCA variance, ROC curve, per-model accuracy, feature importance)
 - [x] Report writing (Phase 7) — `report/report.md` / `report/report.pdf`
 - [x] Web app (Phase 8) — FastAPI backend (`api/`) + React frontend (`frontend/`): live team-vs-team prediction and an interactive results dashboard
 
-**Latest results** (1504 World Cup matches incl. qualifiers, 5-seed average): ensemble
-**80.3% ± 3.2%** overall accuracy vs. baseline 74.9% ± 2.7% — see `outputs/figures/`.
-The ensemble finishes ahead on all 5 seeds, by between 2.0 and 9.3 points.
+**Headline result — the held-out 2025 season, scored once:**
+
+| | accuracy |
+|---|---|
+| **Proposed ensemble** | **82.2%** |
+| Weighted Win Ratio baseline | 75.4% |
+| Always predict the home side | 59.4% |
+
+281 matches the model had never been trained, tuned, or compared against
+(`python -m src.holdout`). The 6.8-point margin over the baseline is
+**statistically significant** — McNemar p=0.0134 — which is the first time that has been
+true in this project. ROC-AUC 0.907.
+
+Every other number below comes from **development** data (2015–2024, 1504 → 1223 matches
+after the holdout is withheld): ensemble **79.0% ± 3.3%** vs. baseline 76.0%, 5-seed average,
+ahead on all 5 seeds. Those are the numbers used to choose the model; the holdout is the one
+used to report it. See [Why there is a holdout](#why-there-is-a-holdout).
 Run `python -m src.pipeline` to reproduce, or `python -m src.make_figures` to
 regenerate the figures.
 
@@ -197,7 +212,12 @@ Three changes, each measured on its own across all 5 seeds:
 | \+ squad shape & position aggregation | 78.6% ± 1.8% | +3.8 pp | 5 / 5 |
 | \+ goal-difference-weighted Elo | 78.9% ± 1.9% | +4.2 pp | 5 / 5 |
 | \+ `_diff`-only representation | 78.8% ± 1.1 | +4.0 pp | 5 / 5 |
-| \+ edition-aware squad join | **80.3% ± 3.2%** | **+5.3 pp** | **5 / 5** |
+| \+ edition-aware squad join | 80.3% ± 3.2% | +5.3 pp | 5 / 5 |
+| \+ EA aggregate ratings (FC 25 adapter) | **79.0% ± 3.3%** † | **+3.0 pp** | **5 / 5** |
+
+† measured on development only, after the 2025 holdout was withheld — not comparable row-to-row with the
+lines above it, which were measured on the full set. On the same development data the previous
+configuration scores 78.6%, so the adapter is worth about +0.4 pp.
 
 - **History features** (`src/features/history_features.py`) give the model Elo, the baseline's
   own weighted win ratio, matches played, head-to-head record and recent form. Every value is
@@ -263,6 +283,31 @@ Three changes, each measured on its own across all 5 seeds:
 Per-seed McNemar reaches p<0.05 on 2 of the 5 seeds (p ranging 0.012–0.41,
 n=299 per test set). What changed is that the margin is positive on every seed rather than two.
 
+#### Why there is a holdout
+
+Roughly fifteen configurations were compared against the same five random splits over the
+course of this work, each kept or discarded on how it scored there. That is model selection on
+a test set, and its effect compounds quietly. It showed up directly: across the same stretch
+the random-split figure climbed 78.9% → 80.3%, while an untuned temporal split went
+79.7% → 79.5%. The last round of "gains" had not replicated.
+
+So **2025 is now withheld entirely** (`evaluation.holdout_years`). `build_match_dataset()`
+drops it, which means it never reaches feature selection, hyperparameter tuning, the seed
+variance charts, the figures, or the served model. The only thing that reads it is
+`python -m src.holdout`, which scores it once and says so.
+
+```bash
+python -m src.holdout
+```
+
+The cost is real: 281 fewer training matches, which is why the 2026 bracket drops from 86.7%
+to 83.3%. The benefit is that **82.2%** is a number no decision was made against.
+
+One caveat kept honest: the holdout was locked *after* most configuration choices had already
+been made with 2025 visible, so it is clean for everything from the FC 25 adapter onward, not
+for the whole history of the project. That it came in *above* the development estimate rather
+than below is the reassuring direction.
+
 #### Validity checks
 
 Two things that would invalidate the headline number were tested directly rather than assumed:
@@ -294,19 +339,21 @@ python -m src.backtest_wc2026
 | Round of 32 | 16 | 88% | 50% |
 | Round of 16 | 8 | 88% | 88% |
 | Quarter-finals | 4 | 100% | 100% |
-| Semi-finals | 2 | 50% | 50% |
-| **Overall** | **30** | **86.7%** | **66.7%** |
+| Semi-finals | 2 | 0% | 50% |
+| **Overall** | **30** | **83.3%** | **66.7%** |
 
-86.7% out of sample sits above the cross-validated 80.3% ± 3.2%, which is the main evidence
+83.3% out of sample sits above the development figure of 79.0% ± 3.3%, which is the main evidence
 that the model generalises rather than fitting its own test splits — though *above* is itself a
 warning sign rather than a triumph. The goal-difference Elo change was worth +0.33 pp in
 cross-validation and appears to be worth +10 pp here; that gap is three matches out of thirty,
 so most of it is luck, and the cross-validated figure is the one to quote. Two more caveats:
-with n=30 the 95% interval is ±12.2%, so the 20-point margin over the baseline is **not**
+with n=30 the 95% interval is ±13.3%, so the 17-point margin over the baseline is **not**
 statistically significant; and 4 of the 30 ties were decided on penalties, which the model has
 no way to represent — it predicts a 90-minute winner and is scored against the shootout result.
 
-The model still gets one semi-final wrong, picking England over Argentina.
+The model gets both semi-finals wrong, picking France over Spain and England over Argentina. Note this
+bracket is now predicted by a model trained without 2025 matches at all, since they are held out — 281
+fewer training matches, which costs it roughly one tie.
 
 Neither the third-place playoff nor the final has a recorded score in this dataset, so both are
 genuine forward predictions: **England** to finish third (56%), and **Spain** to beat Argentina

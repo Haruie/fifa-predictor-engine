@@ -106,3 +106,18 @@ evaluation:
   # A match is "high-scoring" if combined goals >= this threshold (tune during EDA)
   high_scoring_goal_threshold: 3
   output_dir: outputs
+
+  # Years withheld from development entirely. `build_match_dataset()` drops them,
+  # so nothing in these years reaches feature selection, hyperparameter tuning,
+  # seed-variance reporting, the figures, or the served model -- the only way to
+  # see them is `python -m src.holdout`, which scores them once.
+  #
+  # Why this exists: roughly fifteen configurations were compared against the
+  # same five random splits, keeping whichever scored higher each time. That is
+  # selection on the test set, and it accumulates -- the random-split number
+  # drifted up 78.9% -> 80.3% while an untuned temporal split went 79.7% ->
+  # 79.5%, i.e. the last round of "gains" did not replicate. A number that has
+  # never been optimised against is the only one worth publishing.
+  #
+  # Set to [] to train on everything (and lose the guarantee).
+  holdout_years: [2025]

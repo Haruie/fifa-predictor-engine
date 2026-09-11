@@ -26,6 +26,8 @@ import re
 
 import pandas as pd
 
+from src.data.collect_players import AGGREGATE_COLUMNS
+
 # EA Sports FC 25 -- nyagami/ea-sports-fc-25-database-ratings-and-stats
 # (male_players.csv). Chosen over the sofifa-derived FC 25 sets because those
 # either ship empty attribute columns or carry national-team membership in place
@@ -34,6 +36,12 @@ FC25_COLUMN_MAP = {
     "Name": "short_name", "Age": "age", "Nation": "nationality_name",
     "Team": "club_name", "Preferred foot": "preferred_foot",
     "Position": "player_positions", "OVR": "overall",
+    # EA's six headline summaries, and the two trait ratings. Present here all
+    # along and simply never mapped, which left them 100% null for 2025 and so
+    # excluded from the model for every year.
+    "PAC": "pace", "SHO": "shooting", "PAS": "passing",
+    "DRI": "dribbling", "DEF": "defending", "PHY": "physic",
+    "Skill moves": "skill_moves", "Weak foot": "weak_foot",
     "Crossing": "attacking_crossing", "Finishing": "attacking_finishing",
     "Heading Accuracy": "attacking_heading_accuracy",
     "Short Passing": "attacking_short_passing", "Volleys": "attacking_volleys",
@@ -62,6 +70,11 @@ FC25_COLUMN_MAP = {
 FC26_COLUMN_MAP = {
     "commonName": "short_name", "age": "age", "nationality": "nationality_name",
     "team": "club_name", "preferredFoot": "preferred_foot",
+    # NOTE: the six aggregate ratings and skill_moves / weak_foot are mapped for
+    # FC 25 but not here -- this file's column names have not been checked
+    # against the source, and guessing them would silently map nothing while
+    # looking like it worked (normalize_modern_players drops absent keys). Add
+    # them once 2026 is actually pulled.
     "position": "player_positions", "overallRating": "overall",
     "crossing": "attacking_crossing", "finishing": "attacking_finishing",
     "headingAccuracy": "attacking_heading_accuracy",
@@ -119,6 +132,18 @@ def normalize_modern_players(df: pd.DataFrame, column_map: dict[str, str]) -> pd
             out["long_name"] = (df["firstName"].fillna("") + " " + df["lastName"].fillna("")).str.strip()
         else:
             out["long_name"] = out.get("short_name")
+
+    # The six aggregate ratings mean something different for goalkeepers in
+    # these sources: EA reuses the PAC/SHO/PAS/DRI/DEF/PHY slots to show
+    # Diving/Handling/Kicking/Reflexes/Speed/Positioning, so Donnarumma ships
+    # with pace=90 and dribbling=90. The FIFA-era files leave all six null for
+    # keepers instead. Matching that keeps the columns comparable across years,
+    # and the keeper-specific information is already carried by goalkeeping_*.
+    if "player_positions" in out.columns:
+        is_keeper = (out["player_positions"].astype(str)
+                     .str.split(",").str[0].str.strip().str.upper() == "GK")
+        aggregates = [c for c in AGGREGATE_COLUMNS if c in out.columns]
+        out.loc[is_keeper, aggregates] = pd.NA
 
     # Absent upstream -- see the module docstring. nation_position being all-NaN
     # is what routes every nation to the top-N-by-overall fallback.

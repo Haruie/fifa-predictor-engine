@@ -43,7 +43,22 @@ def build_team_profiles(cfg: dict) -> pd.DataFrame:
     return build_all_team_year_profiles(squad)
 
 
-def build_match_dataset(cfg: dict, profiles: pd.DataFrame):
+def split_holdout(cfg: dict, feat: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split the feature frame into (development, holdout) by year.
+
+    The holdout is not a test set in the usual sense -- `run_seed` already
+    carves one of those out of development for each seed. It is insurance
+    against everything those splits have been used for: every configuration
+    compared, kept or discarded on them. See `evaluation.holdout_years`.
+    """
+    years = cfg["evaluation"].get("holdout_years") or []
+    if not years:
+        return feat, feat.iloc[0:0]
+    is_holdout = feat["year"].isin(years)
+    return feat[~is_holdout].copy(), feat[is_holdout].copy()
+
+
+def build_match_dataset(cfg: dict, profiles: pd.DataFrame, apply_holdout: bool = True):
     """Returns (feature-engineered matches in project scope, full WC match
     history, history state).
 
@@ -82,22 +97,40 @@ def build_match_dataset(cfg: dict, profiles: pd.DataFrame):
         print(f"History features: {history_feats.shape[1]} added "
               f"({', '.join(HISTORY_FEATURES)}), as of each match date")
 
+    if apply_holdout:
+        feat, holdout = split_holdout(cfg, feat)
+        if len(holdout):
+            print(f"Holdout: {len(holdout)} matches from "
+                  f"{cfg['evaluation']['holdout_years']} withheld -- "
+                  f"{len(feat)} available for development")
+
     return feat, wc_all_history, history_state
 
 
-def run_seed(cfg: dict, feat: pd.DataFrame, wc_all_history: pd.DataFrame, seed: int) -> pd.DataFrame:
+def run_seed(cfg: dict, feat: pd.DataFrame, wc_all_history: pd.DataFrame, seed: int,
+             idx_train=None, idx_test=None) -> pd.DataFrame:
     """Run one train/test split + fit/eval cycle at the given seed. Returns the
-    comparison report (overall / high-scoring / low-scoring accuracy rows)."""
+    comparison report (overall / high-scoring / low-scoring accuracy rows).
+
+    Args:
+        idx_train, idx_test: explicit row indices, for callers that need a split
+            other than the stratified random one -- `src/holdout.py` passes the
+            whole development set and the withheld years. Supplying these keeps
+            imputation, mirroring, scaling, PCA, tuning and the baseline
+            identical to a normal run, which is the point: the holdout number
+            has to describe the same pipeline that produced everything else.
+    """
     set_seed(seed)
 
     feature_cols = get_feature_columns(feat, cfg["features"].get("representation", "all"))
     X = feat[feature_cols]
     y = feat["label"]
 
-    idx_train, idx_test = train_test_split(
-        feat.index, test_size=cfg["models"]["test_size"],
-        random_state=seed, stratify=y,
-    )
+    if idx_train is None or idx_test is None:
+        idx_train, idx_test = train_test_split(
+            feat.index, test_size=cfg["models"]["test_size"],
+            random_state=seed, stratify=y,
+        )
 
     min_squad = cfg["features"].get("min_squad_size", 0)
     if min_squad:
