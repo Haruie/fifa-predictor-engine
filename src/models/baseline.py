@@ -46,6 +46,10 @@ class WeightedWinRatioBaseline:
         played: dict[str, int] = {}
         wins: dict[str, int] = {}
 
+        # Unplayed fixtures (NaN scores) would otherwise count as a played
+        # match for both teams with no winner, quietly diluting every win ratio.
+        match_history_df = match_history_df.dropna(subset=["home_score", "away_score"])
+
         for row in match_history_df.itertuples(index=False):
             home, away = row.home_team, row.away_team
             played[home] = played.get(home, 0) + 1

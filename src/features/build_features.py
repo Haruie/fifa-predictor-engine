@@ -44,6 +44,12 @@ def build_match_features(matches_df: pd.DataFrame, team_profiles: pd.DataFrame) 
     """
     merged = _attach_team_profiles(matches_df, team_profiles)
 
+    # Drop fixtures with no recorded result BEFORE the draw filter. results.csv
+    # carries scheduled-but-unplayed matches with NaN scores, and `NaN != NaN`
+    # is True in pandas -- so they'd survive the draw filter and then get
+    # `label = (NaN > NaN) = False`, i.e. silently train as away wins.
+    merged = merged.dropna(subset=["home_score", "away_score"])
+
     # Binary label: exclude draws per the paper's classification framing.
     merged = merged[merged["home_score"] != merged["away_score"]].copy()
     merged["label"] = (merged["home_score"] > merged["away_score"]).astype(int)  # 1 = Team A (home) wins
