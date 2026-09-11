@@ -61,6 +61,30 @@ A small full-stack demo sits on top of the pipeline: pick two teams and a FIFA
 edition year for a live ensemble prediction, or browse the evaluation results
 as interactive charts.
 
+The quickest way in — one command starts both halves, waits for the backend to
+finish training/loading, and opens the browser:
+
+```bash
+python start.py
+```
+
+`start.py --backend-only` / `--frontend-only` start one half, `--no-browser`
+skips opening a window, and anything already listening on `:8000` / `:5173` is
+reused rather than started twice. Ctrl+C stops whatever it started.
+
+Because of that reuse, a second `python start.py` finds both ports taken,
+opens the browser and exits right away — leaving no process to Ctrl+C. To
+shut the servers down in that case:
+
+```bash
+python stop.py
+```
+
+It kills by port (`--backend-only` / `--frontend-only` for one half,
+`--dry-run` to see what it would kill first).
+
+To run the two halves by hand instead:
+
 ```bash
 # Terminal 1 — backend (trains the pipeline on first run, ~4 min; then caches to
 # outputs/models/ and loads from cache instantly on subsequent starts)
@@ -134,27 +158,63 @@ safe to re-run.
 ## Status
 
 - [x] Repo scaffolding
-- [x] Data collection (real Kaggle datasets connected: player attributes 2015–2023, match history 1872–present)
-- [x] Feature engineering (1276 team-year profiles, 108 raw features -> ~24 PCA components at 95% variance)
+- [x] Data collection (real Kaggle datasets connected: player attributes 2015–2025 — FIFA 15–23,
+  EA FC 24 from the same author, EA FC 25 mapped via `src/data/adapters.py` — match history 1872–present)
+- [x] Feature engineering (1749 team-year profiles, 111 raw features -> 26–27 PCA components at 95% variance, depending on the split)
 - [x] Baseline (WWR) — fit on full World Cup history (finals + qualifiers), test-leakage safe
-- [x] Ensemble models — 5-model majority vote, trained end-to-end on real data (988 usable matches)
+- [x] Ensemble models — 5-model majority vote, trained end-to-end on real data (1495 usable matches)
 - [x] Evaluation — accuracy, high/low-scoring split, challenging cases, validated across 5 random seeds
 - [x] Report figures (`outputs/figures/`: accuracy comparison, seed variance, confusion matrices,
   PCA variance, ROC curve, per-model accuracy, feature importance)
 - [x] Report writing (Phase 7) — `report/report.md` / `report/report.pdf`
 - [x] Web app (Phase 8) — FastAPI backend (`api/`) + React frontend (`frontend/`): live team-vs-team prediction and an interactive results dashboard
 
-**Latest results** (988 World Cup matches incl. qualifiers, 5-seed average): ensemble
-77.4% ± 1.9% overall accuracy vs. baseline 75.7% ± 1.0% — see `outputs/figures/`.
+**Latest results** (1495 World Cup matches incl. qualifiers, 5-seed average): ensemble
+75.5% ± 2.5% overall accuracy vs. baseline 74.8% ± 2.8% — see `outputs/figures/`.
+The ensemble is ahead on only 2 of the 5 seeds; per-seed margins range from -2.3 to +4.3 points,
+so the mean advantage rests on two good seeds rather than a consistent edge.
 Run `python -m src.pipeline` to reproduce, or `python -m src.make_figures` to
 regenerate the figures.
+
+### Held-out test: the 2026 World Cup knockout bracket
+
+`results.csv` contains the 2026 World Cup, but `data.years` deliberately stops at **2025**, so
+no 2026 match reaches the ensemble or the WWR baseline. Team strength comes from EA FC 25
+squad ratings, published before the tournament began on 2026-06-11. That makes the knockout
+bracket a genuine out-of-sample test rather than a cross-validation fold:
+
+```bash
+python -m src.backtest_wc2026
+```
+
+| Round | Ties | Ensemble | Baseline |
+|---|---|---|---|
+| Round of 32 | 16 | 75% | 50% |
+| Round of 16 | 8 | 75% | 88% |
+| Quarter-finals | 4 | 100% | 100% |
+| Semi-finals | 2 | 0% | 50% |
+| **Overall** | **30** | **73.3%** | **66.7%** |
+
+73.3% out of sample sits within the cross-validated 75.5% ± 2.5%, which is the main evidence
+that the model generalises rather than fitting its own test splits. Two caveats keep it honest:
+with n=30 the 95% interval is ±15.8%, so the 6.7-point margin over the baseline is **not**
+statistically significant; and 4 of the 30 ties were decided on penalties, which the model has
+no way to represent — it predicts a 90-minute winner and is scored against the shootout result.
+
+The model got both semi-finals wrong, picking France over Spain and England over Argentina.
+
+Neither the third-place playoff nor the final has a recorded score in this dataset, so both are
+genuine forward predictions: **France** to finish third (55%), and **Argentina** to beat Spain
+in the final (52%) — barely above a coin flip, which is the correct amount of conviction for a
+World Cup final between those two.
 
 **Beyond overall accuracy**, `python -m src.pipeline` also reports (console + `report.attrs`):
 - Per-model accuracy for each of the 5 base classifiers, before the majority vote
 - Precision / recall / F1 / ROC-AUC (accuracy alone hides the home-win class imbalance)
-- McNemar's test on paired baseline-vs-ensemble predictions — the ~1.7-point accuracy
-  gap is **not statistically significant** at p<0.05 on any single seed (honest finding,
-  not swept under the rug — see the report's Discussion section)
+- McNemar's test on paired baseline-vs-ensemble predictions — the ~0.7-point accuracy
+  gap is **not statistically significant** at p<0.05 on any single seed (per-seed p-values
+  range from 0.12 to 1.00; honest finding, not swept under the rug — see the report's
+  Discussion section)
 - Ensemble accuracy broken down by vote agreement (3/5, 4/5, 5/5 of the base models agreeing)
 - Feature importance (Random Forest + XGBoost, mapped back from PCA-component space to
   the original 108 engineered features) — an approximation, since PCA components have no
