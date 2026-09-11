@@ -79,9 +79,17 @@ DEFENDING_COLUMNS = ["defending_marking_awareness", "defending_standing_tackle",
 GOALKEEPING_COLUMNS = ["goalkeeping_diving", "goalkeeping_handling", "goalkeeping_kicking",
                         "goalkeeping_positioning", "goalkeeping_reflexes"]
 
+# EA's headline rating. Long used only to *pick* the squad (the top-N fallback
+# in clean.filter_national_team_squad) and then discarded, which left the single
+# most informative attribute out of the model entirely. `potential` is NOT here:
+# the FC 25 source carries no equivalent column, so it is 100% null for 2025 and
+# would make every 2025 profile an imputed value.
+RATING_COLUMNS = ["overall"]
+
 ALL_COLUMNS = (
-    METADATA_COLUMNS + ATTACKING_COLUMNS + SKILL_COLUMNS + MOVEMENT_COLUMNS
-    + POWER_COLUMNS + MENTALITY_COLUMNS + DEFENDING_COLUMNS + GOALKEEPING_COLUMNS
+    METADATA_COLUMNS + RATING_COLUMNS + ATTACKING_COLUMNS + SKILL_COLUMNS
+    + MOVEMENT_COLUMNS + POWER_COLUMNS + MENTALITY_COLUMNS + DEFENDING_COLUMNS
+    + GOALKEEPING_COLUMNS
 )
 
 
