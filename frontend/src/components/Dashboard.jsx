@@ -269,6 +269,50 @@ export default function Dashboard() {
         </section>
       </div>
 
+      {data.score_model && (
+        <section className="card">
+          <h3>Scoreline model <Scope>seed {data.default_seed} only</Scope></h3>
+          <p className="score-panel-note">
+            Predicts goals rather than a winner, so it also yields a draw probability — which the
+            binary ensemble structurally cannot express. Shown as a table rather than a chart on
+            purpose: the Dixon-Coles correction moves RPS by about 0.0001, and bars that size
+            would read as identical.
+          </p>
+          <div className="score-table-wrap">
+            <table className="score-table">
+              <thead>
+                <tr>
+                  <th>Variant</th>
+                  <th>RPS ↓</th>
+                  <th>Log loss ↓</th>
+                  <th>Win acc ↑</th>
+                  <th>Exact ↑</th>
+                  <th>Pred. draw</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.score_model.comparison.map((r) => (
+                  <tr key={r.model} className={r.model.startsWith('Baseline') ? 'is-floor' : ''}>
+                    <td>{r.model}</td>
+                    <td>{r.RPS.toFixed(4)}</td>
+                    <td>{r['Log Loss'].toFixed(4)}</td>
+                    <td>{pct(r['Derived Win Accuracy'])}</td>
+                    <td>{pct(r['Exact Scoreline'])}</td>
+                    <td>{pct(r['Predicted Draw Rate'])}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="score-panel-note">
+            Actual draw rate <strong>{pct(data.score_model.comparison[0]['Actual Draw Rate'])}</strong>
+            {' · '}Dixon-Coles ρ = <strong>{data.score_model.dixon_coles_rho.toFixed(4)}</strong>
+            {' · '}win accuracy is measured on decided matches only, so it is comparable to the
+            ensemble above; exact scoreline is only meaningful against its own floor.
+          </p>
+        </section>
+      )}
+
       {featureImportanceRows && (
         <section className="card">
           <h3>Top features driving predictions <Scope>seed {data.default_seed} only</Scope></h3>

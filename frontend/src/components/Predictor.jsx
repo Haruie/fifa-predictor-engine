@@ -163,6 +163,72 @@ export default function Predictor() {
               </div>
             )
           })()}
+          {result.score && (() => {
+            const s = result.score
+            const top = s.most_likely
+            const topPct = Math.round(top.probability * 100)
+            const op = s.outcome_probability
+            // Round once and give the remainder to the last segment, so the
+            // three numbers always add to 100 in the legend.
+            const pctA = Math.round(op.team_a * 100)
+            const pctDraw = Math.round(op.draw * 100)
+            const pctB = 100 - pctA - pctDraw
+            return (
+              <div className="scoreline">
+                <h4>Scoreline</h4>
+                <div className="scoreline-main">
+                  <div className="scoreline-score">
+                    {top.team_a}<span className="sl-dash">–</span>{top.team_b}
+                  </div>
+                  <div className="scoreline-meta">
+                    <span className="sl-pct">{topPct}%</span> most likely
+                    <span className="sl-note">
+                      Football scorelines are genuinely uncertain — even the best guess is a
+                      long way from a safe bet. The three-way split below is the firmer answer.
+                    </span>
+                  </div>
+                </div>
+
+                <div className="xg-row">
+                  <span className="xg-side">{result.team_a} <strong>{s.expected_goals.team_a.toFixed(2)}</strong></span>
+                  <span className="xg-label">expected goals</span>
+                  <span className="xg-side"><strong>{s.expected_goals.team_b.toFixed(2)}</strong> {result.team_b}</span>
+                </div>
+
+                <div className="outcome-bar" role="img"
+                     aria-label={`${result.team_a} ${pctA}%, draw ${pctDraw}%, ${result.team_b} ${pctB}%`}>
+                  <div className="seg seg-a" style={{ width: `${pctA}%` }} />
+                  <div className="seg seg-draw" style={{ width: `${pctDraw}%` }} />
+                  <div className="seg seg-b" style={{ width: `${pctB}%` }} />
+                </div>
+                <div className="outcome-legend">
+                  <span><strong>{pctA}%</strong> {result.team_a}</span>
+                  {/* The draw is the whole point of this model: the ensemble
+                      has no draw class and cannot express this number at all. */}
+                  <span><strong>{pctDraw}%</strong> draw</span>
+                  <span><strong>{pctB}%</strong> {result.team_b}</span>
+                </div>
+
+                <div className="alt-scores">
+                  {s.top_scorelines.map((t) => (
+                    <span className="alt-score" key={`${t.team_a}-${t.team_b}`}>
+                      {t.team_a}–{t.team_b}
+                      <span className="alt-pct">{Math.round(t.probability * 100)}%</span>
+                    </span>
+                  ))}
+                </div>
+
+                {!s.agrees_with_ensemble && (
+                  <p className="scoreline-disagree">
+                    Heads up: the scoreline model favours <strong>{s.favours}</strong>, while the
+                    ensemble picks <strong>{result.winner}</strong>. They are fit to different
+                    targets — goals scored versus who won — so they can disagree on close matches.
+                  </p>
+                )}
+              </div>
+            )
+          })()}
+
           <div className="votes">
             <h4>Model votes</h4>
             <ul>

@@ -5,6 +5,8 @@ Run with: python -m src.pipeline
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
@@ -58,7 +60,8 @@ def split_holdout(cfg: dict, feat: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
     return feat[~is_holdout].copy(), feat[is_holdout].copy()
 
 
-def build_match_dataset(cfg: dict, profiles: pd.DataFrame, apply_holdout: bool = True):
+def build_match_dataset(cfg: dict, profiles: pd.DataFrame, apply_holdout: bool = True,
+                        drop_draws: bool = True):
     """Returns (feature-engineered matches in project scope, full WC match
     history, history state).
 
@@ -66,6 +69,11 @@ def build_match_dataset(cfg: dict, profiles: pd.DataFrame, apply_holdout: bool =
     World Cup history, not just the years with player-feature data. The history
     state is the running team-strength snapshot after the whole record, which
     inference needs to build the same history features training saw.
+
+    `drop_draws=False` keeps drawn matches, for the scoreline model -- see
+    `build_match_features`. Everything else about the frame is identical, so the
+    two tasks are built from the same join, the same history features and the
+    same holdout.
     """
     matches = load_match_data(cfg)
     wc_all_history = filter_world_cup_matches(
@@ -75,6 +83,7 @@ def build_match_dataset(cfg: dict, profiles: pd.DataFrame, apply_holdout: bool =
     feat = build_match_features(
         wc_scope, profiles,
         edition_aware=cfg["features"].get("edition_aware_join", False),
+        drop_draws=drop_draws,
     )
 
     history_state = None
@@ -107,6 +116,103 @@ def build_match_dataset(cfg: dict, profiles: pd.DataFrame, apply_holdout: bool =
     return feat, wc_all_history, history_state
 
 
+@dataclass
+class PreparedSplit:
+    """Everything the feature-prep step produces for one train/test split."""
+    idx_train: pd.Index          # after the thin-squad filter, which drops training rows
+    idx_test: pd.Index
+    X_train: np.ndarray          # scaled, and PCA-projected when configured
+    X_test: np.ndarray
+    mirror_mask: np.ndarray      # bool over the ORIGINAL idx_train, marking mirrored rows
+    train_mean: pd.Series
+    scaler: object
+    pca: object | None
+
+
+def prepare_split(cfg: dict, feat: pd.DataFrame, feature_cols: list[str],
+                  idx_train: pd.Index, idx_test: pd.Index,
+                  verbose: bool = True) -> PreparedSplit:
+    """Impute -> mirror -> scale -> PCA for one split, every step fit on the
+    training rows only.
+
+    Shared by the classifier ensemble and the scoreline model so the two cannot
+    drift apart: this is the leakage-sensitive part of the pipeline (fit the
+    scaler on everything, or mirror before splitting, and the numbers get better
+    for the wrong reason), and it should exist exactly once.
+
+    Targets are deliberately not handled here. The two tasks carry different
+    ones through the side-swap -- the classifier flips its label, the score
+    model swaps home and away goals -- so `mirror_mask` is returned and each
+    caller applies it to whatever it is predicting.
+    """
+    X = feat[feature_cols]
+
+    min_squad = cfg["features"].get("min_squad_size", 0)
+    if min_squad:
+        # Training rows only. The test set keeps its thin-profile matches on
+        # purpose: they are part of the population the model is asked about, so
+        # filtering them from the evaluation would flatter the score rather than
+        # improve the model.
+        thin = feat.loc[idx_train, "squad_size_min"] < min_squad
+        idx_train = idx_train[~thin.to_numpy()]
+        if verbose:
+            print(f"Squad filter: dropped {int(thin.sum())} training rows with a "
+                  f"profile under {min_squad} players -> {len(idx_train)} remain")
+
+    # Impute from the TRAINING split only. Computing the mean over the full
+    # frame first would fold test-set values into the training data, the same
+    # leak that scaling/PCA below are careful to avoid by fitting on train only.
+    train_mean = X.loc[idx_train].mean()
+    X_train, X_test = X.loc[idx_train].fillna(train_mean), X.loc[idx_test].fillna(train_mean)
+
+    mirror_mask = np.zeros(len(idx_train), dtype=bool)
+    if cfg["features"].get("mirror_training_rows", False):
+        # Only neutral-venue rows. At a neutral venue which team results.csv
+        # lists as "home" is arbitrary (48.6% home wins, near a coin flip), so a
+        # side-swapped copy is a second true observation. Qualifiers are not
+        # neutral and the home side really does win 63.1% of them -- mirroring
+        # those would assert the away team had home advantage, injecting a
+        # falsehood, and measurably costs ~2 points of accuracy.
+        #
+        # Strictly after the split, too: mirroring first would put a row and its
+        # own copy on opposite sides, i.e. the same match in train and test.
+        # Imputing first keeps the fill value the real training mean.
+        mirror_mask = feat.loc[idx_train, "neutral_site"].astype(bool).to_numpy()
+        X_train = pd.concat(
+            [X_train, mirror_feature_frame(X_train[mirror_mask])], ignore_index=True
+        )
+        if verbose:
+            print(f"Mirroring: +{int(mirror_mask.sum())} side-swapped neutral-venue rows "
+                  f"-> {len(X_train)} training rows")
+
+    X_train_s, X_test_s, scaler = scale_features(X_train, X_test, cfg["features"]["scaler"])
+    pca = None
+    if cfg["features"]["use_pca"]:
+        X_train_f, X_test_f, pca = apply_pca(X_train_s, X_test_s, cfg["features"]["pca_variance_threshold"])
+        if verbose:
+            print(f"PCA: {X_train_f.shape[1]} components kept of {X_train_s.shape[1]} "
+                  f"(>= {cfg['features']['pca_variance_threshold']:.0%} variance)")
+    else:
+        X_train_f, X_test_f = X_train_s, X_test_s
+
+    return PreparedSplit(idx_train=idx_train, idx_test=idx_test,
+                         X_train=X_train_f, X_test=X_test_f, mirror_mask=mirror_mask,
+                         train_mean=train_mean, scaler=scaler, pca=pca)
+
+
+def mirror_targets(values: pd.Series, mirror_mask: np.ndarray, swap_with: pd.Series | None = None,
+                   flip: bool = False) -> pd.Series:
+    """Extend a training target to cover the mirrored rows `prepare_split` added.
+
+    `flip=True` gives the classifier's `1 - label`; `swap_with` gives the score
+    model's home/away exchange. Exactly one of the two is meaningful per call.
+    """
+    if not mirror_mask.any():
+        return values.reset_index(drop=True)
+    extra = (1 - values[mirror_mask]) if flip else swap_with[mirror_mask]
+    return pd.concat([values, extra], ignore_index=True)
+
+
 def run_seed(cfg: dict, feat: pd.DataFrame, wc_all_history: pd.DataFrame, seed: int,
              idx_train=None, idx_test=None) -> pd.DataFrame:
     """Run one train/test split + fit/eval cycle at the given seed. Returns the
@@ -123,7 +229,6 @@ def run_seed(cfg: dict, feat: pd.DataFrame, wc_all_history: pd.DataFrame, seed: 
     set_seed(seed)
 
     feature_cols = get_feature_columns(feat, cfg["features"].get("representation", "all"))
-    X = feat[feature_cols]
     y = feat["label"]
 
     if idx_train is None or idx_test is None:
@@ -132,52 +237,14 @@ def run_seed(cfg: dict, feat: pd.DataFrame, wc_all_history: pd.DataFrame, seed: 
             random_state=seed, stratify=y,
         )
 
-    min_squad = cfg["features"].get("min_squad_size", 0)
-    if min_squad:
-        # Training rows only. The test set keeps its thin-profile matches on
-        # purpose: they are part of the population the model is asked about, so
-        # filtering them from the evaluation would flatter the score rather than
-        # improve the model.
-        thin = feat.loc[idx_train, "squad_size_min"] < min_squad
-        idx_train = idx_train[~thin.to_numpy()]
-        print(f"Squad filter: dropped {int(thin.sum())} training rows with a "
-              f"profile under {min_squad} players -> {len(idx_train)} remain")
-    # Impute from the TRAINING split only. Computing the mean over the full
-    # frame first would fold test-set values into the training data, the same
-    # leak that scaling/PCA below are careful to avoid by fitting on train only.
-    train_mean = X.loc[idx_train].mean()
-    X_train, X_test = X.loc[idx_train].fillna(train_mean), X.loc[idx_test].fillna(train_mean)
-    y_train, y_test = y.loc[idx_train], y.loc[idx_test]
+    split = prepare_split(cfg, feat, feature_cols, idx_train, idx_test)
+    idx_train, train_mean = split.idx_train, split.train_mean
+    scaler, pca = split.scaler, split.pca
+    X_train_f, X_test_f = split.X_train, split.X_test
+
+    y_train = mirror_targets(y.loc[idx_train], split.mirror_mask, flip=True)
+    y_test = y.loc[idx_test]
     test_rows = feat.loc[idx_test]
-
-    if cfg["features"].get("mirror_training_rows", False):
-        # Only neutral-venue rows. At a neutral venue which team results.csv
-        # lists as "home" is arbitrary (48.6% home wins, near a coin flip), so a
-        # side-swapped copy is a second true observation. Qualifiers are not
-        # neutral and the home side really does win 63.1% of them -- mirroring
-        # those would assert the away team had home advantage, injecting a
-        # falsehood, and measurably costs ~2 points of accuracy.
-        #
-        # Strictly after the split, too: mirroring first would put a row and its
-        # own copy on opposite sides, i.e. the same match in train and test.
-        # Imputing first keeps the fill value the real training mean.
-        mirror_mask = feat.loc[idx_train, "neutral_site"].astype(bool).to_numpy()
-        n_mirrored = int(mirror_mask.sum())
-        X_train = pd.concat(
-            [X_train, mirror_feature_frame(X_train[mirror_mask])], ignore_index=True
-        )
-        y_train = pd.concat([y_train, 1 - y_train[mirror_mask]], ignore_index=True)
-        print(f"Mirroring: +{n_mirrored} side-swapped neutral-venue rows "
-              f"-> {len(X_train)} training rows")
-
-    X_train_s, X_test_s, scaler = scale_features(X_train, X_test, cfg["features"]["scaler"])
-    pca = None
-    if cfg["features"]["use_pca"]:
-        X_train_f, X_test_f, pca = apply_pca(X_train_s, X_test_s, cfg["features"]["pca_variance_threshold"])
-        print(f"PCA: {X_train_f.shape[1]} components kept of {X_train_s.shape[1]} "
-              f"(>= {cfg['features']['pca_variance_threshold']:.0%} variance)")
-    else:
-        X_train_f, X_test_f = X_train_s, X_test_s
 
     print(f"\nTraining ensemble on {len(X_train_f)} matches, testing on {len(X_test_f)}...")
     tuned = tune_all_models(X_train_f, y_train, cfg, seed)
