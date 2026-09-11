@@ -19,6 +19,18 @@ from src.data.collect_players import ALL_COLUMNS
 # Republic", results.csv calls it "South Korea").
 NAME_ALIASES = {
     "Korea Republic": "South Korea",
+    "Korea DPR": "North Korea",
+    "China PR": "China",
+    "Chinese Taipei": "Taiwan",
+    "Brunei Darussalam": "Brunei",
+    "Cape Verde Islands": "Cape Verde",
+    "Congo DR": "DR Congo",
+    "Côte d'Ivoire": "Ivory Coast",
+    "Guinea Bissau": "Guinea-Bissau",
+    "Curacao": "Curaçao",
+    "São Tomé e Príncipe": "São Tomé and Príncipe",
+    "Swaziland": "Eswatini",
+    "Holland": "Netherlands",
 }
 
 

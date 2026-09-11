@@ -22,6 +22,7 @@ TODO (Phase 2):
 from __future__ import annotations
 
 import subprocess
+import sys
 import zipfile
 
 import pandas as pd
@@ -47,8 +48,11 @@ def download_match_data(cfg: dict | None = None) -> None:
         return
 
     print(f"downloading {MATCH_DATASET_SLUG} ...")
+    # `sys.executable -m kaggle`, not a bare "kaggle" -- the console script is
+    # only on PATH when the venv is activated (see collect_players.py).
     result = subprocess.run(
-        ["kaggle", "datasets", "download", "-d", MATCH_DATASET_SLUG, "-p", str(raw_dir)],
+        [sys.executable, "-m", "kaggle", "datasets", "download", "-d", MATCH_DATASET_SLUG,
+         "-p", str(raw_dir)],
         capture_output=True, text=True,
     )
     if result.returncode != 0:

@@ -4,7 +4,11 @@ project:
 
 # Scope per proposal: FIFA World Cup, player rosters 2015-2023
 data:
-  years: [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023]
+  # 2026 is deliberately EXCLUDED: results.csv already contains the 2026 World
+  # Cup, and the bracket backtest (src/backtest_wc2026.py) only means anything
+  # if no 2026 match has been seen in training. 2024 comes from EA FC 24, 2025
+  # from EA FC 25 via src/data/adapters.py.
+  years: [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
   raw_dir: data/raw
   processed_dir: data/processed
   external_dir: data/external

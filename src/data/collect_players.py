@@ -51,6 +51,7 @@ TODO (Phase 2):
 from __future__ import annotations
 
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -110,8 +111,12 @@ def download_player_data(cfg: dict | None = None) -> None:
             continue
 
         print(f"[{year}] downloading {slug} ...")
+        # Invoke via `sys.executable -m kaggle` rather than a bare "kaggle":
+        # the console script only resolves when the venv is *activated*, so a
+        # bare name dies with WinError 2 / FileNotFoundError whenever this is
+        # run as `venv/Scripts/python.exe -m src.data.collect_players`.
         result = subprocess.run(
-            ["kaggle", "datasets", "download", "-d", slug, "-p", str(raw_dir)],
+            [sys.executable, "-m", "kaggle", "datasets", "download", "-d", slug, "-p", str(raw_dir)],
             capture_output=True, text=True,
         )
         if result.returncode != 0:
@@ -126,13 +131,27 @@ def download_player_data(cfg: dict | None = None) -> None:
             # The zip contains multiple CSVs (players, teams, coaches); we only
             # want the players file for this edition.
             member = f"players_{edition}.csv"
-            if member in zf.namelist():
+            extracted = member in zf.namelist()
+            if extracted:
                 zf.extract(member, raw_dir)
                 (raw_dir / member).rename(target_csv)
             else:
-                print(f"[{year}] '{member}' not found in zip; contents: {zf.namelist()}")
+                print(f"[{year}] FAILED: '{member}' not found in zip; "
+                      f"contents: {zf.namelist()}")
+                # FIFA 23 dropped the per-edition players_XX.csv in favour of a
+                # consolidated 'male_players (legacy).csv' carrying every edition
+                # in one file, keyed by a `fifa_version` column. Extract that
+                # file and keep the rows where fifa_version == edition to
+                # produce the same thing this loop expects.
+                print("  (FIFA 23+ ships 'male_players (legacy).csv' with a "
+                      "fifa_version column instead -- slice that to "
+                      f"fifa_version == {edition} and save as {target_csv.name}.)")
         zip_path.unlink(missing_ok=True)
-        print(f"[{year}] saved -> {target_csv}")
+        # Only claim success if a file actually landed -- this print used to sit
+        # outside the if/else and reported "saved" for downloads that extracted
+        # nothing.
+        if extracted:
+            print(f"[{year}] saved -> {target_csv}")
 
 
 def load_player_data(cfg: dict | None = None) -> pd.DataFrame:
