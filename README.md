@@ -183,7 +183,12 @@ safe to re-run.
 281 matches the model had never been trained, tuned, or compared against
 (`python -m src.holdout`). The 6.8-point margin over the baseline is
 **statistically significant** — McNemar p=0.0134 — which is the first time that has been
-true in this project. ROC-AUC 0.907.
+true in this project. ROC-AUC 0.907, and 36 of the 69 matches the baseline gets wrong are
+recovered (52.2%).
+
+One caveat that belongs next to the number: **all 281 holdout matches are qualifiers**. No
+World Cup finals were played in 2025, so the headline is measured on qualifying fixtures
+only — as, largely, is the whole project: finals are 100 of the 1504 usable matches.
 
 Every other number below comes from **development** data (2015–2024, 1504 → 1223 matches
 after the holdout is withheld): ensemble **79.0% ± 3.3%** vs. baseline 76.0%, 5-seed average,
@@ -226,7 +231,7 @@ configuration scores 78.6%, so the adapter is worth about +0.4 pp.
   either. They are built from the full international record, not just World Cup matches,
   because Elo and form need volume.
 - **`neutral_site`** matters on its own. Qualifiers are played home-and-away and the home side
-  wins 63.1% of them; on neutral ground it is 48.6%. Without the flag the model blends the two
+  wins 63.6% of them; on neutral ground it is 46.8%. Without the flag the model blends the two
   and applies a phantom home advantage to every neutral-venue fixture — which is every match at
   the tournament itself.
 - **Mirroring** (appending a side-swapped copy of a training row with the label flipped) only
@@ -265,9 +270,10 @@ configuration scores 78.6%, so the adapter is worth about +0.4 pp.
 - **`_diff`-only representation and an edition-aware squad join** came out of a full audit.
   `<attr>_a`, `<attr>_b` and `<attr>_diff` are collinear by construction, and `h2h_winrate`'s
   three columns are correlated at r = 1.0000 exactly — 163 features carrying far less than 163
-  features' worth of information. Dropping to differences alone (163 → 56) held accuracy and
+  features' worth of information. Dropping to differences alone (163 → 56 on the dataset as it
+  stood then; 188 → 64 today, after the FC 25 columns were mapped) held accuracy and
   cut seed spread from 1.9 to 1.1. The bigger win was the join: FIFA edition *Y* ships around
-  September of *Y−1*, but squads were being looked up by the match's **calendar year**, and 63%
+  September of *Y−1*, but squads were being looked up by the match's **calendar year**, and 68%
   of matches in scope are played September–December — so most fixtures were reading ratings a
   median of 12 months old while a fresher edition already existed. Joining on the edition
   current at the match date moves 55% of rows onto newer squads and is worth **+1.5 pp**, the
@@ -280,8 +286,10 @@ configuration scores 78.6%, so the adapter is worth about +0.4 pp.
   costs more than the added noise. The feature is kept (it is one column and genuinely
   describes the row); `features.min_squad_size` ships at 0.
 
-Per-seed McNemar reaches p<0.05 on 2 of the 5 seeds (p ranging 0.012–0.41,
-n=299 per test set). What changed is that the margin is positive on every seed rather than two.
+Per-seed McNemar does **not** reach p<0.05 on any development seed (p = 0.188, 0.272, 0.230,
+0.391, 0.617; n=245 per test set) — a 3-point gap on 245 rows is simply underpowered. What
+changed is that the margin is positive on every seed rather than two. The significance is on
+the holdout, where the larger +6.8-point margin over 281 matches reaches p=0.0134.
 
 #### Why there is a holdout
 
@@ -317,7 +325,7 @@ Two things that would invalidate the headline number were tested directly rather
   **79.7% ± 0.7% against the baseline's 77.0%**. Accuracy does not drop, so the random-split
   figure is not inflated by hindsight, and the forecasting framing is defensible.
 - **Is the baseline handicapped?** Slightly, and it was worth checking: the ensemble's history
-  features are built from all 49,520 international matches while the WWR baseline is fit on the
+  features are built from all 49,518 international matches while the WWR baseline is fit on the
   9,839 World Cup ones — a 5× information edge. Giving the baseline the full record moves it
   from 74.8% to 74.9%, so the like-for-like margin is **+4.0 pp rather than +4.2 pp** at the
   point that was measured. Real, but small enough that it does not change the conclusion.
@@ -356,21 +364,23 @@ bracket is now predicted by a model trained without 2025 matches at all, since t
 fewer training matches, which costs it roughly one tie.
 
 Neither the third-place playoff nor the final has a recorded score in this dataset, so both are
-genuine forward predictions: **England** to finish third (56%), and **Spain** to beat Argentina
-in the final (54%) — barely above a coin flip, which is the correct amount of conviction for a
+genuine forward predictions: **England** to finish third (62%), and **Spain** to beat Argentina
+in the final (52%) — barely above a coin flip, which is the correct amount of conviction for a
 World Cup final between those two.
 
 **Beyond overall accuracy**, `python -m src.pipeline` also reports (console + `report.attrs`):
 - Per-model accuracy for each of the 5 base classifiers, before the majority vote
 - Precision / recall / F1 / ROC-AUC (accuracy alone hides the home-win class imbalance)
-- McNemar's test on paired baseline-vs-ensemble predictions — the ~5.3-point accuracy
-  margin reaches p<0.05 on 2 of the 5 seeds (per-seed p-values range from 0.005 to
-  0.41; honest finding, not swept under the rug — see the report's Discussion section).
-  With ~299 test rows per seed the test is underpowered for a gap this size; the stronger
-  evidence is that the margin is positive on all 5 seeds
-- Ensemble accuracy broken down by vote agreement (3/5, 4/5, 5/5 of the base models agreeing)
+- McNemar's test on paired baseline-vs-ensemble predictions — the ~3.0-point development
+  accuracy margin reaches p<0.05 on **none** of the 5 seeds (p = 0.188–0.617; honest finding,
+  not swept under the rug — see the report's Discussion section). With 245 test rows per seed
+  the test is underpowered for a gap this size; the stronger evidence on development data is
+  that the margin is positive on all 5 seeds, and the holdout's larger margin *is* significant
+- Ensemble accuracy broken down by vote agreement (3/5, 4/5, 5/5 of the base models agreeing) —
+  pooled over the 5 seeds, a unanimous vote is right 83.9% of the time against 56.2% for a
+  split one
 - Feature importance (Random Forest + XGBoost, mapped back from PCA-component space to
-  the original 56 engineered features) — an approximation, since PCA components have no
+  the original 64 engineered features) — an approximation, since PCA components have no
   direct real-world meaning
 
 ## Reference
