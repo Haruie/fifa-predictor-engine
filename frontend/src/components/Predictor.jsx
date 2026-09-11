@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { getTeams, predict, withRetry } from '../api'
+import TeamCombobox from './TeamCombobox'
 import { MODEL_LABEL } from '../constants'
 
 const DEFAULT_MATCHUP = ['Brazil', 'Germany']
@@ -68,22 +69,26 @@ export default function Predictor() {
   return (
     <div className="card">
       <form className="predict-form" onSubmit={handlePredict}>
-        <div className="field">
-          <label>Team A</label>
-          <select value={teamA} onChange={(e) => setTeamA(e.target.value)}>
-            {teams.map((t) => <option key={t.team} value={t.team}>{t.team}</option>)}
-          </select>
-        </div>
+        <TeamCombobox
+          label="Team A"
+          teams={teams}
+          value={teamA}
+          onChange={setTeamA}
+          excluded={teamB}
+          excludedNote="picked as Team B"
+        />
         <div className="vs">vs</div>
+        <TeamCombobox
+          label="Team B"
+          teams={teams}
+          value={teamB}
+          onChange={setTeamB}
+          excluded={teamA}
+          excludedNote="picked as Team A"
+        />
         <div className="field">
-          <label>Team B</label>
-          <select value={teamB} onChange={(e) => setTeamB(e.target.value)}>
-            {teams.map((t) => <option key={t.team} value={t.team}>{t.team}</option>)}
-          </select>
-        </div>
-        <div className="field">
-          <label>FIFA edition year</label>
-          <select value={year} onChange={(e) => setYear(e.target.value)} disabled={!years.length}>
+          <label htmlFor="edition-year">FIFA edition year</label>
+          <select id="edition-year" value={year} onChange={(e) => setYear(e.target.value)} disabled={!years.length}>
             {years.map((y) => <option key={y} value={y}>{y}</option>)}
           </select>
         </div>
