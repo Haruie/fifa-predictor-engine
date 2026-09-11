@@ -21,6 +21,11 @@ data/processed/*
 outputs/models/*
 !outputs/models/.gitkeep
 
+# Export bundles: fifa_predictor_raw_data.zip repackages the gitignored Kaggle
+# CSVs from data/raw/ (31 MB, third-party data), and data_export.zip just
+# duplicates outputs/data_export/. Both are regenerable; neither belongs in git.
+outputs/*.zip
+
 # Secrets
 .env
 kaggle.json
