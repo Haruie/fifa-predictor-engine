@@ -160,7 +160,8 @@ safe to re-run.
 - [x] Repo scaffolding
 - [x] Data collection (real Kaggle datasets connected: player attributes 2015–2025 — FIFA 15–23,
   EA FC 24 from the same author, EA FC 25 mapped via `src/data/adapters.py` — match history 1872–present)
-- [x] Feature engineering (1749 team-year profiles, 111 raw features -> 26–27 PCA components at 95% variance, depending on the split)
+- [x] Feature engineering (1749 team-year profiles, 130 raw features -> ~30 PCA components at 95% variance, depending on the split):
+  111 squad-attribute columns, 18 as-of-date match-history columns (`src/features/history_features.py`), and a neutral-venue flag
 - [x] Baseline (WWR) — fit on full World Cup history (finals + qualifiers), test-leakage safe
 - [x] Ensemble models — 5-model majority vote, trained end-to-end on real data (1495 usable matches)
 - [x] Evaluation — accuracy, high/low-scoring split, challenging cases, validated across 5 random seeds
@@ -170,18 +171,55 @@ safe to re-run.
 - [x] Web app (Phase 8) — FastAPI backend (`api/`) + React frontend (`frontend/`): live team-vs-team prediction and an interactive results dashboard
 
 **Latest results** (1495 World Cup matches incl. qualifiers, 5-seed average): ensemble
-75.5% ± 2.5% overall accuracy vs. baseline 74.8% ± 2.8% — see `outputs/figures/`.
-The ensemble is ahead on only 2 of the 5 seeds; per-seed margins range from -2.3 to +4.3 points,
-so the mean advantage rests on two good seeds rather than a consistent edge.
+**78.5% ± 2.0%** overall accuracy vs. baseline 74.8% ± 2.8% — see `outputs/figures/`.
+The ensemble finishes ahead on all 5 seeds, by between 1.7 and 6.7 points.
 Run `python -m src.pipeline` to reproduce, or `python -m src.make_figures` to
 regenerate the figures.
+
+#### How it got there
+
+The ensemble originally scored 75.5% ± 2.5% against the baseline's 74.8% — ahead on only
+2 of 5 seeds, and behind on the seed the API serves. The two models were built on disjoint
+information: the ensemble knew squads and nothing about results, the baseline knew results
+and nothing about squads. They disagreed on about a third of matches, and on the matches the
+baseline got wrong the ensemble was right 44% of the time — a perfect router between the two
+would have scored 85.9%. The ensemble had simply never been given what the baseline knows.
+
+Three changes, each measured on its own across all 5 seeds:
+
+| | accuracy | margin over baseline | seeds ahead |
+|---|---|---|---|
+| Starting point | 75.5% ± 2.5% | +0.7 pp | 2 / 5 |
+| \+ `neutral_site` feature | 76.3% ± 2.3% | +1.5 pp | 3 / 5 |
+| \+ as-of-date history features | 78.1% ± 3.0% | +3.3 pp | 4 / 5 |
+| \+ neutral-only row mirroring | **78.5% ± 2.0%** | **+3.7 pp** | **5 / 5** |
+
+- **History features** (`src/features/history_features.py`) give the model Elo, the baseline's
+  own weighted win ratio, matches played, head-to-head record and recent form. Every value is
+  computed *as of the match date* from matches strictly earlier than it, so leak-freedom is
+  structural rather than a property of the split — same-day fixtures cannot see each other
+  either. They are built from the full international record, not just World Cup matches,
+  because Elo and form need volume.
+- **`neutral_site`** matters on its own. Qualifiers are played home-and-away and the home side
+  wins 63.1% of them; on neutral ground it is 48.6%. Without the flag the model blends the two
+  and applies a phantom home advantage to every neutral-venue fixture — which is every match at
+  the tournament itself.
+- **Mirroring** (appending a side-swapped copy of a training row with the label flipped) only
+  pays off restricted to neutral fixtures. Mirroring everything *cost* ~2 points, since
+  asserting that the away side of a qualifier had home advantage is simply false. Restricted to
+  rows where the ordering really is arbitrary it adds 0.4 points and cuts seed-to-seed spread
+  from 3.0 to 2.0 — which is what turns "ahead on 4 of 5 seeds" into "ahead on all 5".
+
+Per-seed McNemar is still mostly not significant (1 of 5 seeds at p<0.05, p ranging 0.005–0.52,
+n=299 per test set). What changed is that the margin is positive on every seed rather than two.
 
 ### Held-out test: the 2026 World Cup knockout bracket
 
 `results.csv` contains the 2026 World Cup, but `data.years` deliberately stops at **2025**, so
 no 2026 match reaches the ensemble or the WWR baseline. Team strength comes from EA FC 25
-squad ratings, published before the tournament began on 2026-06-11. That makes the knockout
-bracket a genuine out-of-sample test rather than a cross-validation fold:
+squad ratings, published before the tournament began on 2026-06-11, and the history features
+are cut at that same kickoff date — so a 2026 result cannot inform a 2026 prediction. That
+makes the knockout bracket a genuine out-of-sample test rather than a cross-validation fold:
 
 ```bash
 python -m src.backtest_wc2026
@@ -189,35 +227,36 @@ python -m src.backtest_wc2026
 
 | Round | Ties | Ensemble | Baseline |
 |---|---|---|---|
-| Round of 32 | 16 | 75% | 50% |
+| Round of 32 | 16 | 81% | 50% |
 | Round of 16 | 8 | 75% | 88% |
 | Quarter-finals | 4 | 100% | 100% |
 | Semi-finals | 2 | 0% | 50% |
-| **Overall** | **30** | **73.3%** | **66.7%** |
+| **Overall** | **30** | **76.7%** | **66.7%** |
 
-73.3% out of sample sits within the cross-validated 75.5% ± 2.5%, which is the main evidence
+76.7% out of sample sits within the cross-validated 78.5% ± 2.0%, which is the main evidence
 that the model generalises rather than fitting its own test splits. Two caveats keep it honest:
-with n=30 the 95% interval is ±15.8%, so the 6.7-point margin over the baseline is **not**
+with n=30 the 95% interval is ±15.1%, so the 10-point margin over the baseline is **not**
 statistically significant; and 4 of the 30 ties were decided on penalties, which the model has
 no way to represent — it predicts a 90-minute winner and is scored against the shootout result.
 
 The model got both semi-finals wrong, picking France over Spain and England over Argentina.
 
 Neither the third-place playoff nor the final has a recorded score in this dataset, so both are
-genuine forward predictions: **France** to finish third (55%), and **Argentina** to beat Spain
-in the final (52%) — barely above a coin flip, which is the correct amount of conviction for a
+genuine forward predictions: **England** to finish third (56%), and **Spain** to beat Argentina
+in the final (54%) — barely above a coin flip, which is the correct amount of conviction for a
 World Cup final between those two.
 
 **Beyond overall accuracy**, `python -m src.pipeline` also reports (console + `report.attrs`):
 - Per-model accuracy for each of the 5 base classifiers, before the majority vote
 - Precision / recall / F1 / ROC-AUC (accuracy alone hides the home-win class imbalance)
-- McNemar's test on paired baseline-vs-ensemble predictions — the ~0.7-point accuracy
-  gap is **not statistically significant** at p<0.05 on any single seed (per-seed p-values
-  range from 0.12 to 1.00; honest finding, not swept under the rug — see the report's
-  Discussion section)
+- McNemar's test on paired baseline-vs-ensemble predictions — the ~3.7-point accuracy
+  margin reaches p<0.05 on only 1 of the 5 seeds (per-seed p-values range from 0.005 to
+  0.52; honest finding, not swept under the rug — see the report's Discussion section).
+  With ~299 test rows per seed the test is underpowered for a gap this size; the stronger
+  evidence is that the margin is positive on all 5 seeds
 - Ensemble accuracy broken down by vote agreement (3/5, 4/5, 5/5 of the base models agreeing)
 - Feature importance (Random Forest + XGBoost, mapped back from PCA-component space to
-  the original 108 engineered features) — an approximation, since PCA components have no
+  the original 130 engineered features) — an approximation, since PCA components have no
   direct real-world meaning
 
 ## Reference
